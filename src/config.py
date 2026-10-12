@@ -1,0 +1,1 @@
+domains = ["Art", "Clipart", "Product", "Real World"]
