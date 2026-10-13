@@ -3,6 +3,7 @@ import transformers
 from pathlib import Path
 from data import OfficeHomeDataset
 from config import model_name_map, template, logit_scale
+import numpy as np
 
 class CLIPModel:
     def __init__(self, model_name: str) -> None:
@@ -47,6 +48,45 @@ class CLIPModel:
         """it returns the zero-shot class scores, which is cosine similarity times the logit scale"""
         return logit_scale * image_feats @ text_feats.T
 
+    @staticmethod
+    def get_probs(logits: torch.Tensor) -> np.ndarray:
+        """it turns class scores into probabilities. float64 is used so that tiny probabilities don't become 0"""
+        return torch.softmax(logits.double(), dim=-1).cpu().numpy()
+
+    @staticmethod
+    def entropy(probs: np.ndarray) -> np.ndarray:
+        """it returns the entropy of each row. low entropy means the model is confident"""
+        # 0 * log 0 is taken as 0, so log is computed only where prob > 0
+        log_probs = np.log(np.where(probs > 0, probs, 1.0))
+
+        return -(probs * log_probs).sum(axis=-1)
+
+    @staticmethod
+    def js_divergence(p0: np.ndarray, p1: np.ndarray) -> np.ndarray:
+        """it returns how much the predictions on the original and the flipped image disagree.
+        it is 0 when both are the same and at most ln 2 when they have no overlap"""
+        mean = (p0 + p1) / 2
+        # JS = entropy of the mean - mean of the two entropies. it is the same as the KL form but shorter
+        js = CLIPModel.entropy(mean) - (CLIPModel.entropy(p0) + CLIPModel.entropy(p1)) / 2
+
+        # tiny negative values can come from rounding
+        return np.clip(js, 0, None)
+
+    @staticmethod
+    def get_signals(p0: np.ndarray, p1: np.ndarray) -> dict:
+        """it computes everything the admission rules need from the two views.
+        p0 is from the original image and p1 from the flipped one, both of shape [num_images, num_classes]"""
+        signals = {
+            "pred": p0.argmax(axis=-1),
+            "entropy": CLIPModel.entropy(p0),
+            "js": CLIPModel.js_divergence(p0, p1),
+            "mean_entropy": (CLIPModel.entropy(p0) + CLIPModel.entropy(p1)) / 2,
+            "entropy_of_mean": CLIPModel.entropy((p0 + p1) / 2),
+            "agree": p0.argmax(axis=-1) == p1.argmax(axis=-1)
+        }
+
+        return signals
+
 def main(model_name: str, domain: str, n_images: int) -> None:
     model = CLIPModel(model_name=model_name)
     ds = OfficeHomeDataset(domain=domain, split="dev")
@@ -61,6 +101,17 @@ def main(model_name: str, domain: str, n_images: int) -> None:
     pred_flip = CLIPModel.get_logits(model.encode_images(flipped), text_feats).argmax(dim=-1)
     print(f"{model_name}, {domain}: text feats {tuple(text_feats.shape)}, {n_images} images, logit scale in model: {model.model.logit_scale.exp().item():.1f}")
     print(f"accuracy original: {(pred_orig == labels).float().mean().item() * 100:.1f}%, flipped: {(pred_flip == labels).float().mean().item() * 100:.1f}%, views agree: {(pred_orig == pred_flip).float().mean().item() * 100:.1f}%")
+
+    # checking JS on examples worked out by hand
+    same = CLIPModel.js_divergence(np.array([[0.8, 0.2]]), np.array([[0.8, 0.2]]))[0]
+    opposite = CLIPModel.js_divergence(np.array([[1.0, 0.0]]), np.array([[0.0, 1.0]]))[0]
+    close = CLIPModel.js_divergence(np.array([[0.8, 0.2]]), np.array([[0.6, 0.4]]))[0]
+    print(f"JS same: {same:.4f} (expected 0), opposite: {opposite:.4f} (expected 0.6931), close: {close:.4f} (expected 0.0242)")
+
+    p0 = CLIPModel.get_probs(CLIPModel.get_logits(model.encode_images(images), text_feats))
+    p1 = CLIPModel.get_probs(CLIPModel.get_logits(model.encode_images(flipped), text_feats))
+    signals = CLIPModel.get_signals(p0, p1)
+    print(f"mean entropy: {signals['entropy'].mean():.3f}, mean JS: {signals['js'].mean():.4f}, JS < 0.01: {(signals['js'] < 0.01).mean() * 100:.1f}%, views agree: {signals['agree'].mean() * 100:.1f}%")
 
 if __name__ == "__main__":
     main("vitb16", "Art", 64)
