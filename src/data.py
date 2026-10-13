@@ -10,12 +10,12 @@ from PIL import Image, ImageOps
 class OfficeHomeDataset(Dataset):
     def __init__(self, domain: str, split: str, frac: float = 1.0, seed: int = 42) -> None:
         """domain is one of Art, Clipart, Product, Real World
-        split is either all, dev, stream or probe
+        split is either all, dev, test or heldout
         frac is fraction of the split in 0 to 1.0, use it only for quick testing
         seed fixes the split so that it is the same in every run"""
         if domain not in domains:
             raise ValueError(f"Unknown domain: {domain}!")
-        if split not in ["all", "dev", "stream", "probe"]:
+        if split not in ["all", "dev", "test", "heldout"]:
             raise ValueError(f"Unknown split: {split}!")
 
         self.domain = domain
@@ -67,12 +67,12 @@ class OfficeHomeDataset(Dataset):
                 class_items = [i for i in items if i["label"] == label]
                 random.Random(self.seed + label).shuffle(class_items)
                 n_dev = math.floor(len(class_items) * split_fracs["dev"])
-                n_stream = math.floor(len(class_items) * split_fracs["stream"])
-                # whatever is left after dev and stream goes to probe
+                n_test = math.floor(len(class_items) * split_fracs["test"])
+                # whatever is left after dev and test goes to heldout
                 splits = {
                     "dev": class_items[:n_dev],
-                    "stream": class_items[n_dev:n_dev + n_stream],
-                    "probe": class_items[n_dev + n_stream:]
+                    "test": class_items[n_dev:n_dev + n_test],
+                    "heldout": class_items[n_dev + n_test:]
                 }
                 data.extend(splits[self.split])
 
@@ -125,26 +125,26 @@ def main(domain: str) -> None:
     # print(ds[0], image.size)
 
     ds_all = OfficeHomeDataset(domain=domain, split="all")
-    split_ids = {s: {i["image_id"] for i in OfficeHomeDataset(domain=domain, split=s).data} for s in ["dev", "stream", "probe"]}
+    split_ids = {s: {i["image_id"] for i in OfficeHomeDataset(domain=domain, split=s).data} for s in ["dev", "test", "heldout"]}
     all_ids = {i["image_id"] for i in ds_all.data}
-    overlap = (split_ids["dev"] & split_ids["stream"]) | (split_ids["dev"] & split_ids["probe"]) | (split_ids["stream"] & split_ids["probe"])
-    missing = all_ids - (split_ids["dev"] | split_ids["stream"] | split_ids["probe"])
+    overlap = (split_ids["dev"] & split_ids["test"]) | (split_ids["dev"] & split_ids["heldout"]) | (split_ids["test"] & split_ids["heldout"])
+    missing = all_ids - (split_ids["dev"] | split_ids["test"] | split_ids["heldout"])
 
     sizes = ", ".join(f"{s}: {len(v)}" for s, v in split_ids.items())
     print(f"{domain}: {len(ds_all)} images, {len(ds_all.class_names)} classes, {sizes}, overlap: {len(overlap)}, missing: {len(missing)}")
 
-    ds = OfficeHomeDataset(domain=domain, split="stream")
+    ds = OfficeHomeDataset(domain=domain, split="test")
     print(f"order 0: {ds.get_order(order_seed=0)[:5]}, order 1: {ds.get_order(order_seed=1)[:5]}")
 
-    ds = OfficeHomeDataset(domain=domain, split="stream")
+    ds = OfficeHomeDataset(domain=domain, split="test")
     image = OfficeHomeDataset._load_image(ds[0]["image_path"])
     flipped = OfficeHomeDataset._flip_image(image)
     # flipping twice should give back the same image
     same = list(OfficeHomeDataset._flip_image(flipped).getdata()) == list(image.getdata())
     print(f"{domain}: {ds.prompt_names()[:3]}, flip size: {flipped.size}, flip twice same: {same}")
 
-    ds_small = OfficeHomeDataset(domain=domain, split="stream", frac=0.1)
-    print(f"{domain}: stream with frac=0.1 has {len(ds_small)} of {len(ds)} images")
+    ds_small = OfficeHomeDataset(domain=domain, split="test", frac=0.1)
+    print(f"{domain}: test with frac=0.1 has {len(ds_small)} of {len(ds)} images")
 
 if __name__ == "__main__":
     for domain in domains:
