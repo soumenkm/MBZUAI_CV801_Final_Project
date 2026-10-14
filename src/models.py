@@ -87,6 +87,64 @@ class CLIPModel:
 
         return signals
 
+    @staticmethod
+    def new_cache(num_classes: int, k: int, dim: int) -> dict:
+        """it makes an empty cache with k slots per class. the slots of class c are rows c*k to (c+1)*k.
+        an empty slot has label -1"""
+        cache = {
+            "num_classes": num_classes,
+            "k": k,
+            "feats": np.zeros((num_classes * k, dim), dtype=np.float32),
+            "labels": np.full(num_classes * k, -1),
+            "entropy": np.full(num_classes * k, np.inf),
+            "js": np.zeros(num_classes * k),
+            "idx": np.full(num_classes * k, -1)
+        }
+
+        return cache
+
+    @staticmethod
+    def add_to_cache(cache: dict, feat: np.ndarray, label: int, entropy: float, js: float, idx: int) -> str:
+        """it tries to put an image into the slots of its predicted class.
+        if there is an empty slot it is added. if the class is full, it replaces the least confident
+        (highest entropy) entry, but only if the new image is more confident. it returns what happened"""
+        start = label * cache["k"]
+        empty = np.where(cache["labels"][start:start + cache["k"]] == -1)[0]
+        if len(empty) > 0:
+            pos = start + empty[0]
+            action = "added"
+        else:
+            pos = start + cache["entropy"][start:start + cache["k"]].argmax()
+            if entropy >= cache["entropy"][pos]:
+                return "rejected"
+            action = "replaced"
+
+        cache["feats"][pos] = feat
+        cache["labels"][pos] = label
+        cache["entropy"][pos] = entropy
+        cache["js"][pos] = js
+        cache["idx"][pos] = idx
+
+        return action
+
+    @staticmethod
+    def read_cache(cache: dict, feat: np.ndarray, beta: float, gamma: float = 0.0) -> np.ndarray:
+        """it returns the vote of the cache for each class. entries that look like the image vote more.
+        with gamma > 0, entries whose two views disagreed vote less. gamma = 0 is the ordinary cache"""
+        votes = np.zeros(cache["num_classes"])
+        filled = cache["labels"] >= 0
+        if not filled.any():
+            return votes
+
+        sims = cache["feats"][filled] @ feat
+        # similarity 1 gives weight 1, lower similarity gives a weight close to 0 (same as TDA and Tip-Adapter)
+        weights = np.exp(-beta * (1 - sims))
+        weights = weights * np.exp(-gamma * cache["js"][filled] / np.log(2))
+        # add each entry's weight to the vote of its stored label
+        np.add.at(votes, cache["labels"][filled], weights)
+
+        return votes
+
 def main(model_name: str, domain: str, n_images: int) -> None:
     model = CLIPModel(model_name=model_name)
     ds = OfficeHomeDataset(domain=domain, split="dev")
@@ -112,6 +170,22 @@ def main(model_name: str, domain: str, n_images: int) -> None:
     p1 = CLIPModel.get_probs(CLIPModel.get_logits(model.encode_images(flipped), text_feats))
     signals = CLIPModel.get_signals(p0, p1)
     print(f"mean entropy: {signals['entropy'].mean():.3f}, mean JS: {signals['js'].mean():.4f}, JS < 0.01: {(signals['js'] < 0.01).mean() * 100:.1f}%, views agree: {signals['agree'].mean() * 100:.1f}%")
+
+    # example: the query is [1, 0] and the three stored entries have similarity 0.95, 0.70 and 0.20 with it
+    cache = CLIPModel.new_cache(num_classes=3, k=1, dim=2)
+    for label, sim in [(0, 0.95), (1, 0.70), (2, 0.20)]:
+        CLIPModel.add_to_cache(cache, np.array([sim, np.sqrt(1 - sim**2)]), label, entropy=0.1, js=0.0, idx=label)
+    base = np.array([2.0, 2.1, 0.0])
+    print(f"scores with cache: {base + CLIPModel.read_cache(cache, np.array([1.0, 0.0]), beta=5.0)}, expected [2.779 2.323 0.018]")
+
+    # one class with 2 slots: 0.2 and 0.45 fill it, 0.3 replaces 0.45, 0.6 is rejected
+    cache = CLIPModel.new_cache(num_classes=2, k=2, dim=2)
+    actions = [CLIPModel.add_to_cache(cache, np.array([1.0, 0.0]), 0, entropy=e, js=0.0, idx=i) for i, e in enumerate([0.2, 0.45, 0.3, 0.6])]
+    print(f"actions: {actions}, entropies kept: {cache['entropy'][:2]}, expected [0.2 0.3]")
+
+    # with gamma = 2, an entry with JS = ln 2 should vote exp(-2) = 0.135 times as much as with gamma = 0
+    cache["js"][:2] = np.log(2)
+    print(f"vote with gamma 0: {CLIPModel.read_cache(cache, np.array([1.0, 0.0]), beta=5.0)[0]:.3f}, gamma 2: {CLIPModel.read_cache(cache, np.array([1.0, 0.0]), beta=5.0, gamma=2.0)[0]:.3f} (expected 2.000 and 0.271)")
 
 if __name__ == "__main__":
     main("vitb16", "Art", 64)
