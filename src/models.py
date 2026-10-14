@@ -145,6 +145,33 @@ class CLIPModel:
 
         return votes
 
+    @staticmethod
+    def is_allowed(rule: str, signals: dict, i: int, state: dict) -> bool:
+        """it decides whether image i is allowed to enter the cache under a rule. it never looks at the true label.
+        state holds what the rule needs, like the threshold, the admit rate or the class-wise means"""
+        if rule == "always":
+            return True
+        if rule in ["js", "mean_entropy", "entropy_of_mean"]:
+            return signals[rule][i] <= state["threshold"]
+        if rule == "random":
+            return state["rng"].random() < state["rate"]
+        if rule == "agree":
+            return bool(signals["agree"][i])
+        if rule == "adaptive":
+            # entropy divided by ln C so that it is between 0 and 1
+            norm_entropy = signals["entropy"][i] / np.log(len(state["class_means"]))
+            threshold = np.clip(state["class_means"][signals["pred"][i]] + state["offset"], 0, 1)
+            return norm_entropy <= threshold
+        raise ValueError(f"Unknown rule: {rule}!")
+
+    @staticmethod
+    def update_class_means(state: dict, signals: dict, i: int) -> None:
+        """it updates the running mean entropy of the predicted class of image i.
+        only the adaptive rule uses it, and it is called after the decision for image i"""
+        norm_entropy = signals["entropy"][i] / np.log(len(state["class_means"]))
+        label = signals["pred"][i]
+        state["class_means"][label] = (1 - state["lam"]) * state["class_means"][label] + state["lam"] * norm_entropy
+
 def main(model_name: str, domain: str, n_images: int) -> None:
     model = CLIPModel(model_name=model_name)
     ds = OfficeHomeDataset(domain=domain, split="dev")
@@ -186,6 +213,25 @@ def main(model_name: str, domain: str, n_images: int) -> None:
     # with gamma = 2, an entry with JS = ln 2 should vote exp(-2) = 0.135 times as much as with gamma = 0
     cache["js"][:2] = np.log(2)
     print(f"vote with gamma 0: {CLIPModel.read_cache(cache, np.array([1.0, 0.0]), beta=5.0)[0]:.3f}, gamma 2: {CLIPModel.read_cache(cache, np.array([1.0, 0.0]), beta=5.0, gamma=2.0)[0]:.3f} (expected 2.000 and 0.271)")
+
+    # random predictions for 1000 images, just to check that the rules admit the expected share
+    rng = np.random.default_rng(0)
+    p0 = rng.dirichlet(np.full(65, 0.3), size=1000)
+    p1 = rng.dirichlet(np.full(65, 0.3), size=1000)
+    signals = CLIPModel.get_signals(p0, p1)
+
+    state = {"threshold": np.quantile(signals["js"], 0.5)}
+    js_rate = np.mean([CLIPModel.is_allowed("js", signals, i, state) for i in range(1000)])
+    state = {"rng": np.random.default_rng(0), "rate": 0.25}
+    random_rate = np.mean([CLIPModel.is_allowed("random", signals, i, state) for i in range(1000)])
+    print(f"js rule admits {js_rate * 100:.1f}% (expected 50%), random rule admits {random_rate * 100:.1f}% (expected about 25%)")
+
+    # class mean 0.3 and offset 0.05 give threshold 0.35, so normalised entropy 0.32 is allowed
+    state = {"class_means": np.full(65, 0.3), "offset": 0.05, "lam": 0.05}
+    one = {"entropy": np.array([0.32 * np.log(65)]), "pred": np.array([4])}
+    allowed = CLIPModel.is_allowed("adaptive", one, 0, state)
+    CLIPModel.update_class_means(state, one, 0)
+    print(f"adaptive allowed: {allowed} (expected True), new class mean: {state['class_means'][4]:.3f} (expected 0.301)")
 
 if __name__ == "__main__":
     main("vitb16", "Art", 64)
