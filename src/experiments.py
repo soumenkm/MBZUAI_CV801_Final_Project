@@ -4,7 +4,8 @@ from pathlib import Path
 from tqdm import tqdm
 from data import OfficeHomeDataset
 from models import CLIPModel
-from config import domains, k, alpha, beta
+from config import domains, k, alpha, beta, target_rates, gamma_grid, order_seeds, adaptive_lam, conditions
+import json
 
 class Experiments:
     def __init__(self, model_name: str, domain: str, frac: float = 1.0) -> None:
@@ -18,6 +19,9 @@ class Experiments:
         self.output_dir = Path(self.cwd, "outputs")
         self.feature_dir = Path(self.output_dir, "features")
         self.feature_dir.mkdir(parents=True, exist_ok=True)
+
+        self.run_dir = Path(self.output_dir, "runs", f"{self.model_name}_{self.domain.replace(' ', '_')}_frac{self.frac}")
+        self.run_dir.mkdir(parents=True, exist_ok=True)
 
         # CLIP is loaded only when features have to be extracted
         self.model = None
@@ -119,6 +123,79 @@ class Experiments:
         """it returns the share of images whose final prediction is correct, in percent"""
         return 100 * np.mean([r["pred_final"] == r["label"] for r in rows])
 
+    def calibrate_offset(self, rate: float) -> float:
+        """the adaptive rule has no direct threshold, so this finds the offset that makes it admit
+        about the target share of dev images. then it can be compared with the other rules at the same rate"""
+        signals = self.signals["dev"]
+        start_mean = (signals["entropy"] / np.log(self.num_classes)).mean()
+        best_offset, best_gap = 0.0, np.inf
+        for offset in np.linspace(-0.5, 0.5, 101):
+            state = {"class_means": np.full(self.num_classes, start_mean), "offset": offset, "lam": adaptive_lam}
+            allowed = []
+            for i in range(len(signals["pred"])):
+                allowed.append(CLIPModel.is_allowed("adaptive", signals, i, state))
+                CLIPModel.update_class_means(state, signals, i)
+            if abs(np.mean(allowed) - rate) < best_gap:
+                best_offset, best_gap = offset, abs(np.mean(allowed) - rate)
+
+        return best_offset
+
+    def make_state(self, rule: str, rate: float, seed: int) -> dict:
+        """it sets up what an admission rule needs before a run. thresholds come from the dev split,
+        so that the rule admits about the target share of images. nothing from the test split is used"""
+        dev = self.signals["dev"]
+        if rule in ["js", "mean_entropy", "entropy_of_mean"]:
+            return {"threshold": np.quantile(dev[rule], rate)}
+        if rule == "random":
+            return {"rng": np.random.default_rng(seed), "rate": rate}
+        if rule == "adaptive":
+            start_mean = (dev["entropy"] / np.log(self.num_classes)).mean()
+            return {"class_means": np.full(self.num_classes, start_mean), "offset": self.calibrate_offset(rate), "lam": adaptive_lam}
+
+        return {}
+
+    def run_path(self, name: str, rate: float, gamma: float, order_seed: int) -> Path:
+        """it returns where the result of one run is saved"""
+        return Path(self.run_dir, f"{name}_rate{rate}_gamma{gamma}_order{order_seed}.json")
+
+    def run_condition(self, name: str, rate: float, gamma: float, order_seed: int) -> dict:
+        """it runs one condition (for example P1) at one admission rate, gamma and stream order,
+        saves the full result and returns a short summary"""
+        rule = conditions[name]["rule"]
+        # B0 is zero-shot CLIP, the cache is still filled but it has no effect on the prediction
+        alpha_used = 0.0 if name == "B0" else alpha
+        state = self.make_state(rule, rate, seed=order_seed)
+        rows, snapshots = self.run_stream(rule, state, gamma, alpha_used, order_seed)
+
+        result = {"name": name, "rule": rule, "rate": rate, "gamma": gamma, "order_seed": order_seed,
+                  "k": k, "alpha": alpha_used, "beta": beta, "rows": rows, "snapshots": snapshots}
+        path = self.run_path(name, rate, gamma, order_seed)
+        temp_path = path.with_suffix(".temp")
+        with open(temp_path, mode="w", encoding="utf-8") as f:
+            json.dump(result, f)
+        temp_path.replace(path)
+
+        summary = {"name": name, "rate": rate, "gamma": gamma, "order_seed": order_seed,
+                   "accuracy": Experiments.get_accuracy(rows), "admitted": 100 * np.mean([r["allowed"] for r in rows])}
+
+        return summary
+
+    def run_all(self) -> list:
+        """it runs every condition at every admission rate, gamma and stream order"""
+        rate_rules = ["js", "mean_entropy", "entropy_of_mean", "random", "adaptive"]
+        runs = []
+        for name, cond in conditions.items():
+            rates = target_rates if cond["rule"] in rate_rules else [None]
+            gammas = gamma_grid if cond["use_gamma"] else [0.0]
+            for rate in rates:
+                for gamma in gammas:
+                    for order_seed in order_seeds:
+                        runs.append((name, rate, gamma, order_seed))
+
+        summaries = [self.run_condition(*run) for run in tqdm(runs, f"Running {self.domain}", unit="runs")]
+
+        return summaries
+
 def main(model_name: str, domain: str, frac: float) -> None:
     exp = Experiments(model_name=model_name, domain=domain, frac=frac)
     # for split in ["dev", "test", "heldout"]:
@@ -128,11 +205,18 @@ def main(model_name: str, domain: str, frac: float) -> None:
     #     print(f"{domain}, {split}: feats {features['feats0'].shape}, zero-shot {zero_shot:.2f}%, views agree {agree:.1f}%")
 
     # with alpha 0 the cache has no effect, so it must give exactly the zero-shot accuracy
-    zero_shot = 100 * np.mean(exp.signals["test"]["pred"] == exp.features["test"]["labels"])
-    for order_seed in [0, 1, 2]:
-        b0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=0.0, order_seed=order_seed)
-        c0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=alpha, order_seed=order_seed)
-        print(f"{domain}, order {order_seed}: B0 {Experiments.get_accuracy(b0_rows):.2f}% (zero-shot {zero_shot:.2f}%), C0 {Experiments.get_accuracy(c0_rows):.2f}%, cache size at end: {c0_rows[-1]['cache_size']} of {k * exp.num_classes}")
+    # zero_shot = 100 * np.mean(exp.signals["test"]["pred"] == exp.features["test"]["labels"])
+    # for order_seed in [0, 1, 2]:
+    #     b0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=0.0, order_seed=order_seed)
+    #     c0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=alpha, order_seed=order_seed)
+    #     print(f"{domain}, order {order_seed}: B0 {Experiments.get_accuracy(b0_rows):.2f}% (zero-shot {zero_shot:.2f}%), C0 {Experiments.get_accuracy(c0_rows):.2f}%, cache size at end: {c0_rows[-1]['cache_size']} of {k * exp.num_classes}")
+
+    summaries = exp.run_all()
+
+    # short table at the 50% admission rate and gamma 16, averaged over the stream orders
+    for name in conditions:
+        picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
+        print(f"{domain}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
 
 if __name__ == "__main__":
     for domain in domains:
