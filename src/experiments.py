@@ -196,6 +196,23 @@ class Experiments:
 
         return summaries
 
+    def check_invariants(self) -> None:
+        """it checks things that must hold if the code is right: B0 equals zero-shot CLIP, and the readout
+        switch never changes what is stored, so C0 and P2 store the same images, and so do P1 and P3"""
+        def load(name, rate, gamma, order_seed):
+            with open(self.run_path(name, rate, gamma, order_seed), mode="r", encoding="utf-8") as f:
+                return json.load(f)
+
+        zero_shot = 100 * np.mean(self.signals["test"]["pred"] == self.features["test"]["labels"])
+        b0 = Experiments.get_accuracy(load("B0", None, 0.0, order_seeds[0])["rows"])
+        print(f"B0: {b0:.2f}%, zero-shot: {zero_shot:.2f}%, same: {np.isclose(b0, zero_shot)}")
+
+        gamma = gamma_grid[-1]
+        for order_seed in order_seeds:
+            c0_vs_p2 = load("C0", None, 0.0, order_seed)["snapshots"] == load("P2", None, gamma, order_seed)["snapshots"]
+            p1_vs_p3 = all(load("P1", r, 0.0, order_seed)["snapshots"] == load("P3", r, gamma, order_seed)["snapshots"] for r in target_rates)
+            print(f"order {order_seed}: C0 and P2 store the same: {c0_vs_p2}, P1 and P3 store the same: {p1_vs_p3}")
+
 def main(model_name: str, domain: str, frac: float) -> None:
     exp = Experiments(model_name=model_name, domain=domain, frac=frac)
     # for split in ["dev", "test", "heldout"]:
@@ -212,11 +229,12 @@ def main(model_name: str, domain: str, frac: float) -> None:
     #     print(f"{domain}, order {order_seed}: B0 {Experiments.get_accuracy(b0_rows):.2f}% (zero-shot {zero_shot:.2f}%), C0 {Experiments.get_accuracy(c0_rows):.2f}%, cache size at end: {c0_rows[-1]['cache_size']} of {k * exp.num_classes}")
 
     summaries = exp.run_all()
+    exp.check_invariants()
 
-    # short table at the 50% admission rate and gamma 16, averaged over the stream orders
-    for name in conditions:
-        picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
-        print(f"{domain}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
+    # # short table at the 50% admission rate and gamma 16, averaged over the stream orders
+    # for name in conditions:
+    #     picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
+    #     print(f"{domain}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
 
 if __name__ == "__main__":
     for domain in domains:
