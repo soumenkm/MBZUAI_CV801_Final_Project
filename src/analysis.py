@@ -199,14 +199,66 @@ class Analysis:
 
         return acc_df, diff_df
 
+    def cache_stats(self, domain: str, name: str, rate: float, gamma: float, order_seed: int) -> dict:
+        """it describes what a run stored and how the cache changed the predictions. the true labels
+        are used here only to score the run, after it has finished"""
+        run = self.load_run(domain, name, rate, gamma, order_seed)
+        rows = {r["idx"]: r for r in run["rows"]}
+        stored = [rows[i] for i in run["snapshots"][str(len(run["rows"]))]]
+        classes_with_entries = {r["pred_base"] for r in stored}
+        # images whose true class has no entry in the final cache can only be pulled towards other classes
+        covered = [r for r in run["rows"] if r["label"] in classes_with_entries]
+        uncovered = [r for r in run["rows"] if r["label"] not in classes_with_entries]
+
+        def acc_change(subset):
+            if not subset:
+                return np.nan
+            return 100 * np.mean([(r["pred_final"] == r["label"]) - (r["pred_base"] == r["label"]) for r in subset])
+
+        counts = np.bincount([r["pred_base"] for r in stored], minlength=self.signals[domain]["pred"].max() + 1)
+        full_classes = int((counts == run["k"]).sum())
+        
+        stats = {
+            "domain": domain,
+            "condition": name,
+            "admitted": 100 * np.mean([r["allowed"] for r in run["rows"]]),
+            "stored": len(stored),
+            "stored_label_error": 100 * np.mean([r["pred_base"] != r["label"] for r in stored]),
+            "classes_with_entries": len(classes_with_entries),
+            "help": 100 * np.mean([r["pred_base"] != r["label"] and r["pred_final"] == r["label"] for r in run["rows"]]),
+            "harm": 100 * np.mean([r["pred_base"] == r["label"] and r["pred_final"] != r["label"] for r in run["rows"]]),
+            "uncovered_share": 100 * len(uncovered) / len(run["rows"]),
+            "acc_change_covered": acc_change(covered),
+            "acc_change_uncovered": acc_change(uncovered),
+            "full_classes": full_classes
+        }
+
+        return stats
+
+    def cache_table(self, rate: float = 0.5, gamma: float = 16) -> pd.DataFrame:
+        """it makes the cache diagnostics table: every condition and domain, averaged over the stream orders,
+        plus the mean over domains"""
+        stats = [self.cache_stats(d, name, rate, gamma, o) for name in conditions for d in domains for o in order_seeds]
+        df = pd.DataFrame(stats).groupby(["condition", "domain"], sort=False).mean().reset_index()
+        mean_df = df.drop(columns="domain").groupby("condition", sort=False).mean().reset_index()
+
+        for table, kind in [(df, "cache_stats"), (mean_df, "cache_stats_mean")]:
+            path = Path(self.table_dir, f"{kind}_{self.model_name}_rate{rate}_gamma{gamma}.csv")
+            table.round(2).to_csv(path, index=False)
+            print(f"Table saved at {path}")
+
+        return mean_df
+
 def main(model_name: str, frac: float) -> None:
     ana = Analysis(model_name=model_name, frac=frac)
     # print(ana.signal_table().round(3).to_string(index=False))
     # ana.plot_js_hist()
     # ana.plot_within_bin()
 
-    acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
-    print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
+    # acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
+    # print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
+
+    print(ana.cache_table(rate=0.5, gamma=16).round(2).to_string(index=False))
 
 if __name__ == "__main__":
     main("vitb16", 1.0)
