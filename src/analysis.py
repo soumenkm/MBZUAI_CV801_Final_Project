@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.metrics import roc_auc_score
 from models import CLIPModel
-from config import domains
+from config import domains, conditions, order_seeds
+import json
 
 class Analysis:
     def __init__(self, model_name: str, frac: float = 1.0) -> None:
@@ -22,6 +23,8 @@ class Analysis:
         self.fig_dir.mkdir(parents=True, exist_ok=True)
 
         self.signals = {d: self.load_signals(d) for d in domains}
+        # runs are read from disk only once and kept here
+        self.runs = {}
 
     def domain_tag(self, domain: str) -> str:
         """it returns the name part shared by the feature and run files of a domain"""
@@ -142,11 +145,68 @@ class Analysis:
         plt.close()
         print(f"Figure saved at {path}")
 
+    @staticmethod
+    def settings(name: str, rate: float, gamma: float) -> tuple:
+        """conditions without an admission rate or gamma are saved with rate None and gamma 0.0,
+        so this returns the rate and gamma that were actually used for a condition"""
+        rate_rules = ["js", "mean_entropy", "entropy_of_mean", "random", "adaptive"]
+        rate = rate if conditions[name]["rule"] in rate_rules else None
+        gamma = gamma if conditions[name]["use_gamma"] else 0.0
+
+        return rate, gamma
+
+    def load_run(self, domain: str, name: str, rate: float, gamma: float, order_seed: int) -> dict:
+        """it loads one saved run of experiments.py"""
+        rate, gamma = Analysis.settings(name, rate, gamma)
+        key = (domain, name, rate, gamma, order_seed)
+        if key not in self.runs:
+            path = Path(self.output_dir, "runs", self.domain_tag(domain), f"{name}_rate{rate}_gamma{gamma}_order{order_seed}.json")
+            with open(path, mode="r", encoding="utf-8") as f:
+                self.runs[key] = json.load(f)
+
+        return self.runs[key]
+
+    @staticmethod
+    def accuracy(run: dict) -> float:
+        """it returns the accuracy of the final predictions of a run, in percent"""
+        return 100 * np.mean([r["pred_final"] == r["label"] for r in run["rows"]])
+
+    def accuracy_tables(self, rate: float = 0.5, gamma: float = 16) -> tuple:
+        """it makes two tables. the first has the accuracy of every condition per domain (mean and std over
+        the stream orders). the second has the difference to C0, paired by stream order"""
+        acc_rows, diff_rows = [], []
+        for name in conditions:
+            acc_row, diff_row = {"condition": name}, {"condition": name}
+            wins = 0
+            for domain in domains:
+                accs = np.array([Analysis.accuracy(self.load_run(domain, name, rate, gamma, o)) for o in order_seeds])
+                c0 = np.array([Analysis.accuracy(self.load_run(domain, "C0", rate, gamma, o)) for o in order_seeds])
+                acc_row[f"{domain}_mean"], acc_row[f"{domain}_std"] = accs.mean(), accs.std()
+                diff_row[f"{domain}_mean"], diff_row[f"{domain}_std"] = (accs - c0).mean(), (accs - c0).std()
+                wins += int((accs > c0).sum())
+            acc_row["mean"] = np.mean([acc_row[f"{d}_mean"] for d in domains])
+            diff_row["mean"] = np.mean([diff_row[f"{d}_mean"] for d in domains])
+            # in how many (domain, order) pairs the condition beats C0
+            diff_row["wins_vs_C0"] = f"{wins}/{len(domains) * len(order_seeds)}"
+            acc_rows.append(acc_row)
+            diff_rows.append(diff_row)
+        acc_df, diff_df = pd.DataFrame(acc_rows), pd.DataFrame(diff_rows)
+
+        for df, kind in [(acc_df, "accuracy"), (diff_df, "diff_vs_C0")]:
+            path = Path(self.table_dir, f"{kind}_{self.model_name}_rate{rate}_gamma{gamma}.csv")
+            df.round(2).to_csv(path, index=False)
+            print(f"Table saved at {path}")
+
+        return acc_df, diff_df
+
 def main(model_name: str, frac: float) -> None:
     ana = Analysis(model_name=model_name, frac=frac)
-    print(ana.signal_table().round(3).to_string(index=False))
-    ana.plot_js_hist()
-    ana.plot_within_bin()
+    # print(ana.signal_table().round(3).to_string(index=False))
+    # ana.plot_js_hist()
+    # ana.plot_within_bin()
+
+    acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
+    print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
 
 if __name__ == "__main__":
     main("vitb16", 1.0)
