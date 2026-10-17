@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.metrics import roc_auc_score
 from models import CLIPModel
-from config import domains, conditions, order_seeds
+from config import domains, conditions, target_rates, gamma_grid, order_seeds
 import json
 
 class Analysis:
@@ -249,6 +249,64 @@ class Analysis:
 
         return mean_df
 
+    def mean_result(self, domain: str, name: str, rate: float, gamma: float) -> tuple:
+        """it returns the accuracy and the admitted share of a condition, averaged over the stream orders.
+        domain Mean averages over all domains"""
+        if domain == "Mean":
+            results = [self.mean_result(d, name, rate, gamma) for d in domains]
+            return np.mean([r[0] for r in results]), np.mean([r[1] for r in results])
+        runs = [self.load_run(domain, name, rate, gamma, o) for o in order_seeds]
+        acc = np.mean([Analysis.accuracy(r) for r in runs])
+        admitted = np.mean([100 * np.mean([row["allowed"] for row in r["rows"]]) for r in runs])
+
+        return acc, admitted
+
+    def plot_acc_vs_rate(self) -> None:
+        """it plots accuracy against the share of test images each admission rule actually admitted,
+        with zero-shot CLIP (B0) and the ordinary cache (C0) as reference lines"""
+        rules = {"P1": "P1 (JS)", "B2": "B2 (mean view entropy)", "B3": "B3 (entropy of mean)",
+                 "B4": "B4 (random)", "B6": "B6 (class-wise adaptive)"}
+        panels = domains + ["Mean"]
+        fig, axs = plt.subplots(1, len(panels), figsize=(4 * len(panels), 3.8), squeeze=False)
+        for ax, domain in zip(axs[0], panels):
+            for name, label in rules.items():
+                results = [self.mean_result(domain, name, r, 0.0) for r in target_rates]
+                ax.plot([r[1] for r in results], [r[0] for r in results], marker="o", label=label)
+            ax.axhline(self.mean_result(domain, "B0", None, 0.0)[0], color="gray", linestyle=":", label="B0 (zero-shot)")
+            ax.axhline(self.mean_result(domain, "C0", None, 0.0)[0], color="black", linestyle="--", label="C0 (admit all)")
+            ax.set_title(f"{domain} (mean over {len(order_seeds)} orders)")
+            ax.set_xlabel("Admitted share of test images (%)")
+            ax.set_ylabel("Accuracy (%)")
+        axs[0][-1].legend(fontsize=7)
+        plt.tight_layout()
+
+        path = Path(self.fig_dir, f"acc_vs_rate_{self.model_name}.png")
+        plt.savefig(path, dpi=300)
+        plt.close()
+        print(f"Figure saved at {path}")
+
+    def plot_gamma(self, rate: float = 0.5) -> None:
+        """it plots accuracy against gamma for JS readout alone (P2) and with JS admission (P3),
+        with C0 (gamma = 0) and P1 (JS admission, gamma = 0) as reference lines"""
+        panels = domains + ["Mean"]
+        fig, axs = plt.subplots(1, len(panels), figsize=(4 * len(panels), 3.8), squeeze=False)
+        for ax, domain in zip(axs[0], panels):
+            for name in ["P2", "P3"]:
+                ax.plot(gamma_grid, [self.mean_result(domain, name, rate, g)[0] for g in gamma_grid], marker="o", label=name)
+            ax.axhline(self.mean_result(domain, "C0", None, 0.0)[0], color="black", linestyle="--", label="C0 (gamma = 0)")
+            ax.axhline(self.mean_result(domain, "P1", rate, 0.0)[0], color="gray", linestyle=":", label="P1 (gamma = 0)")
+            ax.set_xscale("log")
+            ax.set_title(f"{domain} (mean over {len(order_seeds)} orders)")
+            ax.set_xlabel("gamma")
+            ax.set_ylabel("Accuracy (%)")
+        axs[0][-1].legend(fontsize=7)
+        plt.tight_layout()
+
+        path = Path(self.fig_dir, f"gamma_{self.model_name}_rate{rate}.png")
+        plt.savefig(path, dpi=300)
+        plt.close()
+        print(f"Figure saved at {path}")
+
 def main(model_name: str, frac: float) -> None:
     ana = Analysis(model_name=model_name, frac=frac)
     # print(ana.signal_table().round(3).to_string(index=False))
@@ -258,7 +316,10 @@ def main(model_name: str, frac: float) -> None:
     # acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
     # print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
 
-    print(ana.cache_table(rate=0.5, gamma=16).round(2).to_string(index=False))
+    # print(ana.cache_table(rate=0.5, gamma=16).round(2).to_string(index=False))
+
+    ana.plot_acc_vs_rate()
+    ana.plot_gamma(rate=0.5)
 
 if __name__ == "__main__":
     main("vitb16", 1.0)
