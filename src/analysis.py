@@ -309,14 +309,14 @@ class Analysis:
 
 def main(model_name: str, frac: float) -> None:
     ana = Analysis(model_name=model_name, frac=frac)
-    # print(ana.signal_table().round(3).to_string(index=False))
-    # ana.plot_js_hist()
-    # ana.plot_within_bin()
+    print(ana.signal_table().round(3).to_string(index=False))
+    ana.plot_js_hist()
+    ana.plot_within_bin()
 
-    # acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
-    # print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
+    acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
+    print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
 
-    # print(ana.cache_table(rate=0.5, gamma=16).round(2).to_string(index=False))
+    print(ana.cache_table(rate=0.5, gamma=16).round(2).to_string(index=False))
 
     ana.plot_acc_vs_rate()
     ana.plot_gamma(rate=0.5)

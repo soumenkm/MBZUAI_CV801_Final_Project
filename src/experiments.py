@@ -215,26 +215,26 @@ class Experiments:
 
 def main(model_name: str, domain: str, frac: float) -> None:
     exp = Experiments(model_name=model_name, domain=domain, frac=frac)
-    # for split in ["dev", "test", "heldout"]:
-    #     features = exp.load_features(split)
-    #     zero_shot = 100 * np.mean(features["logits0"].argmax(axis=1) == features["labels"])
-    #     agree = 100 * np.mean(features["logits0"].argmax(axis=1) == features["logits1"].argmax(axis=1))
-    #     print(f"{domain}, {split}: feats {features['feats0'].shape}, zero-shot {zero_shot:.2f}%, views agree {agree:.1f}%")
+    for split in ["dev", "test", "heldout"]:
+        features = exp.load_features(split)
+        zero_shot = 100 * np.mean(features["logits0"].argmax(axis=1) == features["labels"])
+        agree = 100 * np.mean(features["logits0"].argmax(axis=1) == features["logits1"].argmax(axis=1))
+        print(f"{domain}, {split}: feats {features['feats0'].shape}, zero-shot {zero_shot:.2f}%, views agree {agree:.1f}%")
 
     # with alpha 0 the cache has no effect, so it must give exactly the zero-shot accuracy
-    # zero_shot = 100 * np.mean(exp.signals["test"]["pred"] == exp.features["test"]["labels"])
-    # for order_seed in [0, 1, 2]:
-    #     b0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=0.0, order_seed=order_seed)
-    #     c0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=alpha, order_seed=order_seed)
-    #     print(f"{domain}, order {order_seed}: B0 {Experiments.get_accuracy(b0_rows):.2f}% (zero-shot {zero_shot:.2f}%), C0 {Experiments.get_accuracy(c0_rows):.2f}%, cache size at end: {c0_rows[-1]['cache_size']} of {k * exp.num_classes}")
+    zero_shot = 100 * np.mean(exp.signals["test"]["pred"] == exp.features["test"]["labels"])
+    for order_seed in [0, 1, 2]:
+        b0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=0.0, order_seed=order_seed)
+        c0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=alpha, order_seed=order_seed)
+        print(f"{domain}, order {order_seed}: B0 {Experiments.get_accuracy(b0_rows):.2f}% (zero-shot {zero_shot:.2f}%), C0 {Experiments.get_accuracy(c0_rows):.2f}%, cache size at end: {c0_rows[-1]['cache_size']} of {k * exp.num_classes}")
 
     summaries = exp.run_all()
     exp.check_invariants()
 
-    # # short table at the 50% admission rate and gamma 16, averaged over the stream orders
-    # for name in conditions:
-    #     picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
-    #     print(f"{domain}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
+    # short table at the 50% admission rate and gamma 16, averaged over the stream orders
+    for name in conditions:
+        picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
+        print(f"{domain}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
 
 if __name__ == "__main__":
     for domain in domains:
