@@ -1,0 +1,4 @@
+domain,condition,entries,total_utility,helpful_share,harmful_share,utility_correct_label,utility_wrong_label,spearman_neg_entropy,spearman_neg_js
+ImageNet-A,C0,1530.0,-1.7313,14.7059,14.7712,0.0078,-0.0077,0.0601,0.0609
+ImageNet-A,P1,1359.0,-1.5522,16.5563,16.7035,0.0047,-0.0055,-0.0278,-0.0324
+ImageNet-A,B2,1291.0,2.4478,18.9775,15.182,0.0109,-0.006,0.0066,0.0278
