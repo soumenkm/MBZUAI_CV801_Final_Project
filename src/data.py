@@ -1,7 +1,7 @@
 from torch.utils.data import Dataset
 from pathlib import Path
 from PIL import Image
-from config import domains, split_fracs
+from config import data_paths, domains, split_fracs
 
 import random
 import math
@@ -9,23 +9,24 @@ from PIL import Image, ImageOps
 import numpy as np
 
 class OfficeHomeDataset(Dataset):
-    def __init__(self, domain: str, split: str, frac: float = 1.0, seed: int = 42) -> None:
+    def __init__(self, domain: str, split: str, dataset: str = "officehome", frac: float = 1.0, seed: int = 42) -> None:
         """domain is one of Art, Clipart, Product, Real World
         split is either all, dev, test or heldout
         frac is fraction of the split in 0 to 1.0, use it only for quick testing
         seed fixes the split so that it is the same in every run"""
-        if domain not in domains:
+        if domain not in domains[dataset]:
             raise ValueError(f"Unknown domain: {domain}!")
         if split not in ["all", "dev", "test", "heldout"]:
             raise ValueError(f"Unknown split: {split}!")
 
         self.domain = domain
         self.split = split
+        self.dataset = dataset
         self.frac = frac
         self.seed = seed
 
         self.cwd = Path.cwd()
-        self.data_path = Path(self.cwd, "data/OfficeHomeDataset")
+        self.data_path = Path(self.cwd, data_paths[self.dataset])
         self.domain_path = Path(self.data_path, self.domain)
 
         self.class_names = self._load_class_names()
@@ -119,7 +120,7 @@ class OfficeHomeDataset(Dataset):
 
         return image
 
-def main(domain: str) -> None:
+def main(dataset: str, domain: str) -> None:
     # ds = OfficeHomeDataset(domain=domain)
     # image = OfficeHomeDataset._load_image(ds[0]["image_path"])
     # print(f"{domain}: {len(ds)} images, {len(ds.class_names)} classes")
@@ -147,14 +148,21 @@ def main(domain: str) -> None:
     # ds_small = OfficeHomeDataset(domain=domain, split="test", frac=0.1)
     # print(f"{domain}: test with frac=0.1 has {len(ds_small)} of {len(ds)} images")
 
-    ds = OfficeHomeDataset(domain=domain, split="test")
-    image = OfficeHomeDataset._load_image(ds[0]["image_path"])
-    flipped = OfficeHomeDataset._flip_image(image)
+    # ds = OfficeHomeDataset(domain=domain, split="test")
+    # image = OfficeHomeDataset._load_image(ds[0]["image_path"])
+    # flipped = OfficeHomeDataset._flip_image(image)
    
-    same = np.array_equal(np.array(OfficeHomeDataset._flip_image(flipped)), np.array(image))
-    changed = not np.array_equal(np.array(flipped), np.array(image))
-    print(f"{domain}: test images: {len(ds)}, flip twice same: {same}, one flip changes: {changed}")
+    # same = np.array_equal(np.array(OfficeHomeDataset._flip_image(flipped)), np.array(image))
+    # changed = not np.array_equal(np.array(flipped), np.array(image))
+    # print(f"{domain}: test images: {len(ds)}, flip twice same: {same}, one flip changes: {changed}")
+
+    sizes = {s: len(OfficeHomeDataset(domain=domain, split=s, dataset=dataset)) for s in ["all", "dev", "test", "heldout"]}
+    ds = OfficeHomeDataset(domain=domain, split="test", dataset=dataset)
+    image = OfficeHomeDataset._load_image(ds[0]["image_path"])
+    print(f"{dataset}, {domain}: {len(ds.class_names)} classes, {sizes}, first image {image.size}, prompt names: {ds.prompt_names()[:3]}")
+
 
 if __name__ == "__main__":
-    for domain in domains:
-        main(domain)
+    main("officehome", "Art")
+    main("imagenetr", "ImageNet-R")
+    main("imageneta", "ImageNet-A")

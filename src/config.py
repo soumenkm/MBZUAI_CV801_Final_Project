@@ -1,4 +1,7 @@
-domains = ["Art", "Clipart", "Product", "Real World"]
+data_paths = {"officehome": "data/OfficeHomeDataset", "imagenetr": "data/ImageNetR", "imageneta": "data/ImageNetA"}
+domains = {"officehome": ["Art", "Clipart", "Product", "Real World"], "imagenetr": ["ImageNet-R"], "imageneta": ["ImageNet-A"]}
+model_names = ["vitb16", "vitb32"]
+
 split_fracs = {"dev": 0.1, "test": 0.7, "heldout": 0.2}
 
 model_name_map = {"vitb16": "clip-vit-base-patch16", "vitb32": "clip-vit-base-patch32"}

@@ -140,7 +140,9 @@ class CLIPModel:
             return votes
 
         labels = cache["labels"][filled]
-        sims = cache["feats"][filled] @ feat
+        # similarity with every slot first, then keep the filled ones. indexing the feature matrix
+        # would copy it for every image, which is slow for large caches
+        sims = (cache["feats"] @ feat)[filled]
         # similarity 1 gives weight 1, lower similarity gives a weight close to 0 (same as TDA and Tip-Adapter)
         weights = np.exp(-beta * (1 - sims))
         js_weights = weights * np.exp(-gamma * cache["js"][filled] / np.log(2))
@@ -151,7 +153,7 @@ class CLIPModel:
             return votes
 
         # add each entry's weight to the vote of its stored label
-        np.add.at(votes, labels, js_weights)
+        votes = np.bincount(labels, weights=js_weights, minlength=cache["num_classes"]).astype(float)
 
         if readout == "norm":
             counts = np.bincount(labels, minlength=cache["num_classes"])

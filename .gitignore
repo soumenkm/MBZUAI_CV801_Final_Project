@@ -3,6 +3,8 @@ outputs/ckpt
 outputs/runs
 models/
 temp/
+outputs/features
+*.hf_cache*
 
 *.tsv
 *.parquet

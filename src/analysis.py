@@ -5,30 +5,32 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.metrics import roc_auc_score
 from models import CLIPModel
-from config import domains, conditions, target_rates, gamma_grid, order_seeds, k_values
+from config import domains, model_names, conditions, target_rates, gamma_grid, order_seeds, k_values
 import json
 
 class Analysis:
-    def __init__(self, model_name: str, k: int, frac: float = 1.0) -> None:
-        """model_name, k and frac pick which saved features and runs are analysed"""
+    def __init__(self, model_name: str, k: int, dataset: str = "officehome", frac: float = 1.0) -> None:
+        """model_name, k, dataset and frac pick which saved features and runs are analysed"""
         self.model_name = model_name
         self.k = k
+        self.dataset = dataset
+        self.domains = domains[dataset]
         self.frac = frac
 
         self.cwd = Path.cwd()
         self.output_dir = Path(self.cwd, "outputs")
         self.feature_dir = Path(self.output_dir, "features")
-        self.table_dir = Path(self.output_dir, "tables", f"k{self.k}")
-        self.fig_dir = Path(self.output_dir, "figures", f"k{self.k}")
+        self.table_dir = Path(self.output_dir, "tables", self.dataset, f"k{self.k}")
+        self.fig_dir = Path(self.output_dir, "figures", self.dataset, f"k{self.k}")
         self.table_dir.mkdir(parents=True, exist_ok=True)
         self.fig_dir.mkdir(parents=True, exist_ok=True)
 
-        self.signals = {d: self.load_signals(d) for d in domains}
-        # runs are read from disk only once and kept here
+        self.signals = {d: self.load_signals(d) for d in self.domains}
+        # recently loaded runs are kept here, so the same file is not read again and again
         self.runs = {}
 
     def domain_tag(self, domain: str) -> str:
-        """it returns the name part shared by the feature and run files of a domain"""
+        """it returns the name part shared by the feature files of a domain"""
         return f"{self.model_name}_{domain.replace(' ', '_')}_frac{self.frac}"
 
     def load_signals(self, domain: str) -> dict:
@@ -79,7 +81,7 @@ class Analysis:
         """RQ1 table: how much the two views differ in each domain, and how well each score separates
         correct from wrong zero-shot predictions (AUROC, 0.5 is chance level)"""
         rows = []
-        for domain in domains:
+        for domain in self.domains:
             s = self.signals[domain]
             row = {
                 "domain": domain,
@@ -106,8 +108,8 @@ class Analysis:
 
     def plot_js_hist(self) -> None:
         """it plots the distribution of JS between the two views for each domain, on a log scale"""
-        fig, axs = plt.subplots(1, len(domains), figsize=(4 * len(domains), 3.5), squeeze=False)
-        for ax, domain in zip(axs[0], domains):
+        fig, axs = plt.subplots(1, len(self.domains), figsize=(4 * len(self.domains), 3.5), squeeze=False)
+        for ax, domain in zip(axs[0], self.domains):
             js = self.signals[domain]["js"]
             ax.hist(np.log10(np.clip(js, 1e-6, None)), bins=50)
             ax.set_title(f"{domain} (N={len(js)})")
@@ -123,8 +125,8 @@ class Analysis:
     def plot_within_bin(self) -> None:
         """it plots zero-shot accuracy in each entropy decile, separately for images with JS below and
         above the median JS of that decile. a gap between the two lines means JS adds information"""
-        fig, axs = plt.subplots(1, len(domains), figsize=(4 * len(domains), 3.5), squeeze=False)
-        for ax, domain in zip(axs[0], domains):
+        fig, axs = plt.subplots(1, len(self.domains), figsize=(4 * len(self.domains), 3.5), squeeze=False)
+        for ax, domain in zip(axs[0], self.domains):
             s = self.signals[domain]
             bins = Analysis.entropy_bins(s["entropy"])
             low, high = [], []
@@ -161,6 +163,9 @@ class Analysis:
         rate, gamma = Analysis.settings(name, rate, gamma)
         key = (domain, name, rate, gamma, order_seed)
         if key not in self.runs:
+            # ImageNet-R runs are large, so the kept runs are cleared every 50 runs to save memory
+            if len(self.runs) >= 50:
+                self.runs.clear()
             path = Path(self.output_dir, "runs", f"{self.model_name}_{domain.replace(' ', '_')}_k{self.k}_frac{self.frac}", f"{name}_rate{rate}_gamma{gamma}_order{order_seed}.json")
             with open(path, mode="r", encoding="utf-8") as f:
                 self.runs[key] = json.load(f)
@@ -179,16 +184,16 @@ class Analysis:
         for name in conditions:
             acc_row, diff_row = {"condition": name}, {"condition": name}
             wins = 0
-            for domain in domains:
+            for domain in self.domains:
                 accs = np.array([Analysis.accuracy(self.load_run(domain, name, rate, gamma, o)) for o in order_seeds])
                 c0 = np.array([Analysis.accuracy(self.load_run(domain, "C0", rate, gamma, o)) for o in order_seeds])
                 acc_row[f"{domain}_mean"], acc_row[f"{domain}_std"] = accs.mean(), accs.std()
                 diff_row[f"{domain}_mean"], diff_row[f"{domain}_std"] = (accs - c0).mean(), (accs - c0).std()
                 wins += int((accs > c0).sum())
-            acc_row["mean"] = np.mean([acc_row[f"{d}_mean"] for d in domains])
-            diff_row["mean"] = np.mean([diff_row[f"{d}_mean"] for d in domains])
+            acc_row["mean"] = np.mean([acc_row[f"{d}_mean"] for d in self.domains])
+            diff_row["mean"] = np.mean([diff_row[f"{d}_mean"] for d in self.domains])
             # in how many (domain, order) pairs the condition beats C0
-            diff_row["wins_vs_C0"] = f"{wins}/{len(domains) * len(order_seeds)}"
+            diff_row["wins_vs_C0"] = f"{wins}/{len(self.domains) * len(order_seeds)}"
             acc_rows.append(acc_row)
             diff_rows.append(diff_row)
         acc_df, diff_df = pd.DataFrame(acc_rows), pd.DataFrame(diff_rows)
@@ -218,7 +223,7 @@ class Analysis:
 
         counts = np.bincount([r["pred_base"] for r in stored], minlength=self.signals[domain]["pred"].max() + 1)
         full_classes = int((counts == run["k"]).sum())
-        
+
         stats = {
             "domain": domain,
             "condition": name,
@@ -239,7 +244,7 @@ class Analysis:
     def cache_table(self, rate: float = 0.5, gamma: float = 16) -> pd.DataFrame:
         """it makes the cache diagnostics table: every condition and domain, averaged over the stream orders,
         plus the mean over domains"""
-        stats = [self.cache_stats(d, name, rate, gamma, o) for name in conditions for d in domains for o in order_seeds]
+        stats = [self.cache_stats(d, name, rate, gamma, o) for name in conditions for d in self.domains for o in order_seeds]
         df = pd.DataFrame(stats).groupby(["condition", "domain"], sort=False).mean().reset_index()
         mean_df = df.drop(columns="domain").groupby("condition", sort=False).mean().reset_index()
 
@@ -254,7 +259,7 @@ class Analysis:
         """it returns the accuracy and the admitted share of a condition, averaged over the stream orders.
         domain Mean averages over all domains"""
         if domain == "Mean":
-            results = [self.mean_result(d, name, rate, gamma) for d in domains]
+            results = [self.mean_result(d, name, rate, gamma) for d in self.domains]
             return np.mean([r[0] for r in results]), np.mean([r[1] for r in results])
         runs = [self.load_run(domain, name, rate, gamma, o) for o in order_seeds]
         acc = np.mean([Analysis.accuracy(r) for r in runs])
@@ -267,7 +272,7 @@ class Analysis:
         with zero-shot CLIP (B0) and the ordinary cache (C0) as reference lines"""
         rules = {"P1": "P1 (JS)", "B2": "B2 (mean view entropy)", "B3": "B3 (entropy of mean)",
                  "B4": "B4 (random)", "B6": "B6 (class-wise adaptive)"}
-        panels = domains + ["Mean"]
+        panels = self.domains + ["Mean"]
         fig, axs = plt.subplots(1, len(panels), figsize=(4 * len(panels), 3.8), squeeze=False)
         for ax, domain in zip(axs[0], panels):
             for name, label in rules.items():
@@ -289,7 +294,7 @@ class Analysis:
     def plot_gamma(self, rate: float = 0.5) -> None:
         """it plots accuracy against gamma for JS readout alone (P2) and with JS admission (P3),
         with C0 (gamma = 0) and P1 (JS admission, gamma = 0) as reference lines"""
-        panels = domains + ["Mean"]
+        panels = self.domains + ["Mean"]
         fig, axs = plt.subplots(1, len(panels), figsize=(4 * len(panels), 3.8), squeeze=False)
         for ax, domain in zip(axs[0], panels):
             for name in ["P2", "P3"]:
@@ -308,21 +313,8 @@ class Analysis:
         plt.close()
         print(f"Figure saved at {path}")
 
-def main(model_name: str, k: int, frac: float) -> None:
-    # ana = Analysis(model_name=model_name, frac=frac)
-    # print(ana.signal_table().round(3).to_string(index=False))
-    # ana.plot_js_hist()
-    # ana.plot_within_bin()
-
-    # acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
-    # print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
-
-    # print(ana.cache_table(rate=0.5, gamma=16).round(2).to_string(index=False))
-
-    # ana.plot_acc_vs_rate()
-    # ana.plot_gamma(rate=0.5)
-
-    ana = Analysis(model_name=model_name, k=k, frac=frac)
+def main(model_name: str, k: int, dataset: str, frac: float) -> None:
+    ana = Analysis(model_name=model_name, k=k, dataset=dataset, frac=frac)
     print(ana.signal_table().round(3).to_string(index=False))
     ana.plot_js_hist()
     ana.plot_within_bin()
@@ -336,5 +328,7 @@ def main(model_name: str, k: int, frac: float) -> None:
     ana.plot_gamma(rate=0.5)
 
 if __name__ == "__main__":
-    for k in k_values:
-        main("vitb16", k, 1.0)
+    for model_name in model_names:
+        for dataset in ["officehome", "imageneta", "imagenetr"]:
+            for k in k_values:
+                main(model_name, k, dataset, 1.0)

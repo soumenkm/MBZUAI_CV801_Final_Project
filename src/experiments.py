@@ -4,17 +4,18 @@ from pathlib import Path
 from tqdm import tqdm
 from data import OfficeHomeDataset
 from models import CLIPModel
-from config import domains, k_values, alpha, beta, target_rates, gamma_grid, order_seeds, adaptive_lam, evict_lam, rescue_low, rescue_high, rescue_js, conditions
+from config import domains, model_names, k_values, alpha, beta, target_rates, gamma_grid, order_seeds, adaptive_lam, evict_lam, rescue_low, rescue_high, rescue_js, conditions
 import json
 
 class Experiments:
-    def __init__(self, model_name: str, domain: str, k: int, frac: float = 1.0) -> None:
+    def __init__(self, model_name: str, domain: str, k: int, frac: float = 1.0, dataset: str = "officehome") -> None:
         """model_name is vitb16 or vitb32, domain is one Office-Home domain.
         frac is fraction of each split in 0 to 1.0, use it only for quick testing"""
         self.model_name = model_name
         self.domain = domain
-        self.frac = frac
         self.k = k
+        self.frac = frac
+        self.dataset = dataset
 
         self.cwd = Path.cwd()
         self.output_dir = Path(self.cwd, "outputs")
@@ -27,7 +28,7 @@ class Experiments:
 
         # CLIP is loaded only when features have to be extracted
         self.model = None
-        self.datasets = {s: OfficeHomeDataset(domain=self.domain, split=s, frac=self.frac) for s in ["dev", "test", "heldout"]}
+        self.datasets = {s: OfficeHomeDataset(domain=self.domain, split=s, dataset=self.dataset, frac=self.frac) for s in ["dev", "test", "heldout"]}
         self.num_classes = len(self.datasets["test"].class_names)
 
         self.features = {s: self.load_features(s) for s in ["dev", "test"]}
@@ -290,7 +291,7 @@ class Experiments:
             same_r1 = load("R1x", None, 0.0, order_seed)["snapshots"] == load("R1", None, 0.0, order_seed)["snapshots"]
             print(f"order {order_seed}: T0 stores the same as C0: {same_t0}, R1x stores the same as R1: {same_r1}")
 
-def main(model_name: str, domain: str, k: int, frac: float) -> None:
+def main(model_name: str, dataset: str, domain: str, k: int, frac: float) -> None:
     # exp = Experiments(model_name=model_name, domain=domain, frac=frac)
     # for split in ["dev", "test", "heldout"]:
     #     features = exp.load_features(split)
@@ -313,9 +314,8 @@ def main(model_name: str, domain: str, k: int, frac: float) -> None:
     #     picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
     #     print(f"{domain}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
 
-    exp = Experiments(model_name=model_name, domain=domain, k=k, frac=frac)
-
-    print(f"{domain}, k={k}: runs are saved in {exp.run_dir}")
+    exp = Experiments(model_name=model_name, domain=domain, k=k, frac=frac, dataset=dataset)
+    print(f"{model_name}, {domain}, k={k}: {exp.num_classes} classes, {len(exp.datasets['test'])} test images, runs in {exp.run_dir}")
     summaries = exp.run_all()
     exp.check_invariants()
 
@@ -348,13 +348,19 @@ def main(model_name: str, domain: str, k: int, frac: float) -> None:
     # for gamma in [16, 64]:
     #     print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2s {mean_acc('P2s', None, gamma):.2f}%, P2h {mean_acc('P2h', None, gamma):.2f}%")
 
-    admitted = np.mean([s["admitted"] for s in summaries if s["name"] == "R1"])
-    print(f"{domain}, k={k}: R1 admits {admitted:.1f}%")
-    print(f"{domain}, k={k}, sum: C0 {mean_acc('C0', None, 0.0):.2f}%, B2 at 50% {mean_acc('B2', 0.5, 0.0):.2f}%, B2 at 75% {mean_acc('B2', 0.75, 0.0):.2f}%, R1 {mean_acc('R1', None, 0.0):.2f}%")
-    print(f"{domain}, k={k}, max: C0x {mean_acc('C0x', None, 0.0):.2f}%, B2x at 50% {mean_acc('B2x', 0.5, 0.0):.2f}%, B2x at 75% {mean_acc('B2x', 0.75, 0.0):.2f}%, R1x {mean_acc('R1x', None, 0.0):.2f}%")
-    print(f"{domain}, k={k}: C0 {mean_acc('C0', None, 0.0):.2f}%, T0 {mean_acc('T0', None, 0.0):.2f}%")
+    # admitted = np.mean([s["admitted"] for s in summaries if s["name"] == "R1"])
+    # print(f"{domain}, k={k}: R1 admits {admitted:.1f}%")
+    # print(f"{domain}, k={k}, sum: C0 {mean_acc('C0', None, 0.0):.2f}%, B2 at 50% {mean_acc('B2', 0.5, 0.0):.2f}%, B2 at 75% {mean_acc('B2', 0.75, 0.0):.2f}%, R1 {mean_acc('R1', None, 0.0):.2f}%")
+    # print(f"{domain}, k={k}, max: C0x {mean_acc('C0x', None, 0.0):.2f}%, B2x at 50% {mean_acc('B2x', 0.5, 0.0):.2f}%, B2x at 75% {mean_acc('B2x', 0.75, 0.0):.2f}%, R1x {mean_acc('R1x', None, 0.0):.2f}%")
+    # print(f"{domain}, k={k}: C0 {mean_acc('C0', None, 0.0):.2f}%, T0 {mean_acc('T0', None, 0.0):.2f}%")
+
+    names = ["B0", "C0", "C0x", "T0", "P1", "P1x", "B2", "B2x", "B4", "B4x", "R1x"]
+    print(f"{model_name}, {domain}, k={k}: " + ", ".join(f"{n} {mean_acc(n, 0.5, 0.0):.2f}" for n in names))
+
 
 if __name__ == "__main__":
-    for k in k_values:
-        for domain in domains:
-            main("vitb16", domain, k, 1.0)
+    for model_name in model_names:
+        for dataset in ["officehome", "imageneta", "imagenetr"]:
+            for k in k_values:
+                for domain in domains[dataset]:
+                    main(model_name, dataset, domain, k, 1.0)
