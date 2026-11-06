@@ -132,7 +132,8 @@ class CLIPModel:
         """it returns the vote of the cache for each class. entries that look like the image vote more.
         with gamma > 0, entries whose two views disagreed vote less. gamma = 0 is the ordinary cache.
         readout "sum" adds the votes, "norm" lets each class vote as if its bucket were full,
-        and "mass" rescales the votes so that the JS weights don't change the total vote"""
+        "mass" rescales the votes so that the JS weights don't change the total vote,
+        and "max" lets each class vote only with its most similar entry"""
         votes = np.zeros(cache["num_classes"])
         filled = cache["labels"] >= 0
         if not filled.any():
@@ -143,6 +144,12 @@ class CLIPModel:
         # similarity 1 gives weight 1, lower similarity gives a weight close to 0 (same as TDA and Tip-Adapter)
         weights = np.exp(-beta * (1 - sims))
         js_weights = weights * np.exp(-gamma * cache["js"][filled] / np.log(2))
+
+        if readout == "max":
+            # all weights are positive, so the max of 0 and the weights is the largest weight of each class
+            np.maximum.at(votes, labels, js_weights)
+            return votes
+
         # add each entry's weight to the vote of its stored label
         np.add.at(votes, labels, js_weights)
 
@@ -245,19 +252,27 @@ def main(model_name: str, domain: str, n_images: int) -> None:
     # CLIPModel.update_class_means(state, one, 0)
     # print(f"adaptive allowed: {allowed} (expected True), new class mean: {state['class_means'][4]:.3f} (expected 0.301)")
 
-    # class 0 has 3 entries and class 1 has 1 entry, all with similarity 1, so each weight is 1
-    cache = CLIPModel.new_cache(num_classes=2, k=3, dim=2)
-    for i, label in enumerate([0, 0, 0, 1]):
-        CLIPModel.add_to_cache(cache, np.array([1.0, 0.0]), label, entropy=0.1, js=0.0, idx=i)
-    query = np.array([1.0, 0.0])
-    print(f"sum: {CLIPModel.read_cache(cache, query, beta=5.0)} (expected [3. 1.]), norm: {CLIPModel.read_cache(cache, query, beta=5.0, readout='norm')} (expected [3. 3.])")
+    # # class 0 has 3 entries and class 1 has 1 entry, all with similarity 1, so each weight is 1
+    # cache = CLIPModel.new_cache(num_classes=2, k=3, dim=2)
+    # for i, label in enumerate([0, 0, 0, 1]):
+    #     CLIPModel.add_to_cache(cache, np.array([1.0, 0.0]), label, entropy=0.1, js=0.0, idx=i)
+    # query = np.array([1.0, 0.0])
+    # print(f"sum: {CLIPModel.read_cache(cache, query, beta=5.0)} (expected [3. 1.]), norm: {CLIPModel.read_cache(cache, query, beta=5.0, readout='norm')} (expected [3. 3.])")
 
-    # the class 1 entry has JS = ln 2, so with gamma 2 it votes exp(-2) = 0.135. the total vote is then 3.135 instead of 4,
-    # so mass multiplies both votes by 4 / 3.135
-    cache["js"][3] = np.log(2)
-    print(f"sum, gamma 2: {CLIPModel.read_cache(cache, query, beta=5.0, gamma=2.0)} (expected [3. 0.135])")
-    print(f"mass, gamma 2: {CLIPModel.read_cache(cache, query, beta=5.0, gamma=2.0, readout='mass')} (expected [3.827 0.173])")
-    print(f"mass, gamma 0: {CLIPModel.read_cache(cache, query, beta=5.0, gamma=0.0, readout='mass')} (expected [3. 1.])")
+    # # the class 1 entry has JS = ln 2, so with gamma 2 it votes exp(-2) = 0.135. the total vote is then 3.135 instead of 4,
+    # # so mass multiplies both votes by 4 / 3.135
+    # cache["js"][3] = np.log(2)
+    # print(f"sum, gamma 2: {CLIPModel.read_cache(cache, query, beta=5.0, gamma=2.0)} (expected [3. 0.135])")
+    # print(f"mass, gamma 2: {CLIPModel.read_cache(cache, query, beta=5.0, gamma=2.0, readout='mass')} (expected [3.827 0.173])")
+    # print(f"mass, gamma 0: {CLIPModel.read_cache(cache, query, beta=5.0, gamma=0.0, readout='mass')} (expected [3. 1.])")
+
+    # class 0 has entries with similarity 1, 1 and 0.6, class 1 has one entry with similarity 0.8
+    cache = CLIPModel.new_cache(num_classes=2, k=3, dim=2)
+    for i, (label, sim) in enumerate([(0, 1.0), (0, 1.0), (0, 0.6), (1, 0.8)]):
+        CLIPModel.add_to_cache(cache, np.array([sim, np.sqrt(1 - sim**2)]), label, entropy=0.1, js=0.0, idx=i)
+    query = np.array([1.0, 0.0])
+    print(f"sum: {CLIPModel.read_cache(cache, query, beta=5.0)} (expected [2.135 0.368])")
+    print(f"max: {CLIPModel.read_cache(cache, query, beta=5.0, readout='max')} (expected [1. 0.368])")
 
 if __name__ == "__main__":
     main("vitb16", "Art", 64)

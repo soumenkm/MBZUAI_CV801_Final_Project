@@ -13,7 +13,11 @@ target_rates = [0.25, 0.5, 0.75]
 gamma_grid = [1, 4, 16, 64, 256]   # wide because JS is small for most images
 order_seeds = list(range(10))
 adaptive_lam = 0.05
-# rule: who may enter, readout: how votes are added ("sum", "norm" or "mass")
+evict_lam = 4.0   # E2 replaces by entropy + evict_lam * JS. fixed in advance, E1 already counts JS once
+
+# rule: who may enter, readout: how votes are added ("sum", "norm", "mass" or "max"),
+# evict: which value decides replacement (default "entropy"), score: what the readout weight uses (default "js")
+
 conditions = {
     "B0": {"rule": "always", "readout": "sum", "use_gamma": False},
     "C0": {"rule": "always", "readout": "sum", "use_gamma": False},
@@ -35,5 +39,21 @@ conditions = {
     "B6n": {"rule": "adaptive", "readout": "norm", "use_gamma": False},
 
     # JS readout that keeps the total vote of the cache the same
-    "P2m": {"rule": "always", "readout": "mass", "use_gamma": True}
+    "P2m": {"rule": "always", "readout": "mass", "use_gamma": True},
+
+    # each class votes only with its most similar entry
+    "C0x": {"rule": "always", "readout": "max", "use_gamma": False},
+    "P1x": {"rule": "js", "readout": "max", "use_gamma": False},
+    "B2x": {"rule": "mean_entropy", "readout": "max", "use_gamma": False},
+    "B3x": {"rule": "entropy_of_mean", "readout": "max", "use_gamma": False},
+    "B4x": {"rule": "random", "readout": "max", "use_gamma": False},
+    "B6x": {"rule": "adaptive", "readout": "max", "use_gamma": False},
+
+    # admit all, but JS takes part in deciding which entry is replaced
+    "E1": {"rule": "always", "readout": "sum", "evict": "entropy_of_mean", "use_gamma": False},
+    "E2": {"rule": "always", "readout": "sum", "evict": "entropy_js", "use_gamma": False},
+
+    # same weight values as JS readout, but given to entries at random within a class (P2s) or by entropy rank (P2h)
+    "P2s": {"rule": "always", "readout": "sum", "score": "shuffled_js", "use_gamma": True},
+    "P2h": {"rule": "always", "readout": "sum", "score": "entropy_ranked", "use_gamma": True}
 }

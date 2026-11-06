@@ -4,7 +4,7 @@ from pathlib import Path
 from tqdm import tqdm
 from data import OfficeHomeDataset
 from models import CLIPModel
-from config import domains, k_values, alpha, beta, target_rates, gamma_grid, order_seeds, adaptive_lam, conditions
+from config import domains, k_values, alpha, beta, target_rates, gamma_grid, order_seeds, adaptive_lam, evict_lam, conditions
 
 import json
 
@@ -80,11 +80,15 @@ class Experiments:
 
         return CLIPModel.get_signals(p0, p1)
 
-    def run_stream(self, rule: str, state: dict, gamma: float, alpha_used: float, order_seed: int, readout: str = "sum") -> tuple:
+    def run_stream(self, rule: str, state: dict, gamma: float, alpha_used: float, order_seed: int,
+                   readout: str = "sum", evict_keys: np.ndarray = None, scores: np.ndarray = None) -> tuple:
         """it runs one pass over the test split in the given order. for each image it first predicts with
         the cache built from the earlier images, and only then decides whether the image goes into the cache.
         the true label is saved for the analysis but it is never used to make a decision here"""
         feats, signals = self.features["test"], self.signals["test"]
+        evict_keys = signals["entropy"] if evict_keys is None else evict_keys
+        scores = signals["js"] if scores is None else scores
+    
         cache = CLIPModel.new_cache(num_classes=self.num_classes, k=self.k, dim=feats["feats0"].shape[1])
         order = self.datasets["test"].get_order(order_seed)
         checkpoints = [len(order) // 4, len(order) // 2, len(order)]
@@ -99,7 +103,7 @@ class Experiments:
             allowed = CLIPModel.is_allowed(rule, signals, i, state)
             action = "not allowed"
             if allowed:
-                action = CLIPModel.add_to_cache(cache, feats["feats0"][i], int(signals["pred"][i]), signals["entropy"][i], signals["js"][i], i)
+                action = CLIPModel.add_to_cache(cache, feats["feats0"][i], int(signals["pred"][i]), evict_keys[i], scores[i], i)
             if rule == "adaptive":
                 CLIPModel.update_class_means(state, signals, i)
 
@@ -157,30 +161,63 @@ class Experiments:
 
         return {}
 
+    def make_scores(self, name: str, seed: int) -> tuple:
+        """it returns two values per test image: the eviction key (lower is kept when a bucket is full)
+        and the score used by the readout weight. both are computed before the run, without labels"""
+        s = self.signals["test"]
+        evict = conditions[name].get("evict", "entropy")
+        evict_keys = {"entropy": s["entropy"], "entropy_of_mean": s["entropy_of_mean"],
+                      "entropy_js": s["entropy"] + evict_lam * s["js"]}
+
+        score = conditions[name].get("score", "js")
+        if score == "js":
+            scores = s["js"]
+        elif score == "shuffled_js":
+            # JS is shuffled among images with the same predicted class, so each class keeps its JS values
+            rng = np.random.default_rng(seed)
+            scores = s["js"].copy()
+            for c in np.unique(s["pred"]):
+                idx = np.where(s["pred"] == c)[0]
+                scores[idx] = rng.permutation(scores[idx])
+        elif score == "entropy_ranked":
+            # the image with the k-th smallest entropy gets the k-th smallest JS value
+            ranks = np.argsort(np.argsort(s["entropy"]))
+            scores = np.sort(s["js"])[ranks]
+        else:
+            raise ValueError(f"Unknown score: {score}!")
+
+        return evict_keys[evict], scores
+
     def run_path(self, name: str, rate: float, gamma: float, order_seed: int) -> Path:
         """it returns where the result of one run is saved"""
         return Path(self.run_dir, f"{name}_rate{rate}_gamma{gamma}_order{order_seed}.json")
 
     def run_condition(self, name: str, rate: float, gamma: float, order_seed: int) -> dict:
         """it runs one condition (for example P1) at one admission rate, gamma and stream order,
-        saves the full result and returns a short summary"""
-        rule = conditions[name]["rule"]
-        readout = conditions[name]["readout"]
-        # B0 is zero-shot CLIP, the cache is still filled but it has no effect on the prediction
-        alpha_used = 0.0 if name == "B0" else alpha
-        state = self.make_state(rule, rate, seed=order_seed)
-        rows, snapshots = self.run_stream(rule, state, gamma, alpha_used, order_seed, readout)
-
-        result = {"name": name, "rule": rule, "readout": readout, "rate": rate, "gamma": gamma, "order_seed": order_seed,
-                  "k": self.k, "alpha": alpha_used, "beta": beta, "rows": rows, "snapshots": snapshots}
+        saves the full result and returns a short summary. a run that is already saved is loaded instead"""
         path = self.run_path(name, rate, gamma, order_seed)
-        temp_path = path.with_suffix(".temp")
-        with open(temp_path, mode="w", encoding="utf-8") as f:
-            json.dump(result, f)
-        temp_path.replace(path)
+        if path.exists():
+            with open(path, mode="r", encoding="utf-8") as f:
+                result = json.load(f)
+        else:
+            rule = conditions[name]["rule"]
+            readout = conditions[name]["readout"]
+            # B0 is zero-shot CLIP, the cache is still filled but it has no effect on the prediction
+            alpha_used = 0.0 if name == "B0" else alpha
+            state = self.make_state(rule, rate, seed=order_seed)
+            evict_keys, scores = self.make_scores(name, seed=order_seed)
+            rows, snapshots = self.run_stream(rule, state, gamma, alpha_used, order_seed, readout, evict_keys, scores)
+
+            result = {"name": name, "rule": rule, "readout": readout, "evict": conditions[name].get("evict", "entropy"),
+                      "score": conditions[name].get("score", "js"), "rate": rate, "gamma": gamma, "order_seed": order_seed,
+                      "k": self.k, "alpha": alpha_used, "beta": beta, "rows": rows, "snapshots": snapshots}
+            temp_path = path.with_suffix(".temp")
+            with open(temp_path, mode="w", encoding="utf-8") as f:
+                json.dump(result, f)
+            temp_path.replace(path)
 
         summary = {"name": name, "rate": rate, "gamma": gamma, "order_seed": order_seed,
-                   "accuracy": Experiments.get_accuracy(rows), "admitted": 100 * np.mean([r["allowed"] for r in rows])}
+                   "accuracy": Experiments.get_accuracy(result["rows"]), "admitted": 100 * np.mean([r["allowed"] for r in result["rows"]])}
 
         return summary
 
@@ -224,6 +261,13 @@ class Experiments:
             mass_same = load("P2m", None, gamma, order_seed)["snapshots"] == c0
             print(f"order {order_seed}: norm stores the same as sum: {norm_same}, P2m stores the same as C0: {mass_same}")
 
+        for order_seed in order_seeds:
+            c0 = load("C0", None, 0.0, order_seed)["snapshots"]
+            max_same = load("C0x", None, 0.0, order_seed)["snapshots"] == c0 and all(
+                load("P1x", r, 0.0, order_seed)["snapshots"] == load("P1", r, 0.0, order_seed)["snapshots"] for r in target_rates)
+            score_same = all(load(n, None, gamma, order_seed)["snapshots"] == c0 for n in ["P2s", "P2h"])
+            print(f"order {order_seed}: max stores the same as sum: {max_same}, P2s and P2h store the same as C0: {score_same}")
+
 def main(model_name: str, domain: str, k: int, frac: float) -> None:
     # exp = Experiments(model_name=model_name, domain=domain, frac=frac)
     # for split in ["dev", "test", "heldout"]:
@@ -261,11 +305,26 @@ def main(model_name: str, domain: str, k: int, frac: float) -> None:
         picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, rate] and s["gamma"] in [0.0, gamma]]
         return np.mean([s["accuracy"] for s in picked])
 
-    # if the loss of selective admission comes from sparse buckets being outvoted, norm should close most of the gap to C0
-    for name in ["C0", "P1", "B2", "B3", "B4", "B6"]:
-        print(f"{domain}, k={k}, {name}: sum {mean_acc(name, 0.5, 0.0):.2f}%, norm {mean_acc(name + 'n', 0.5, 0.0):.2f}%")
-    for gamma in [16, 256]:
-        print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2m {mean_acc('P2m', None, gamma):.2f}%")
+    # # if the loss of selective admission comes from sparse buckets being outvoted, norm should close most of the gap to C0
+    # for name in ["C0", "P1", "B2", "B3", "B4", "B6"]:
+    #     print(f"{domain}, k={k}, {name}: sum {mean_acc(name, 0.5, 0.0):.2f}%, norm {mean_acc(name + 'n', 0.5, 0.0):.2f}%")
+    # for gamma in [16, 256]:
+    #     print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2m {mean_acc('P2m', None, gamma):.2f}%")
+
+    # shuffled and entropy ranked scores must have the same values as JS
+    s = exp.signals["test"]
+    _, shuffled = exp.make_scores("P2s", seed=0)
+    _, ranked = exp.make_scores("P2h", seed=0)
+    same_per_class = all(np.array_equal(np.sort(shuffled[s["pred"] == c]), np.sort(s["js"][s["pred"] == c])) for c in np.unique(s["pred"]))
+    print(f"{domain}: shuffled JS keeps the values of each class: {same_per_class}, ranked JS has the same values: {np.array_equal(np.sort(ranked), np.sort(s['js']))}")
+
+    # gap to C0 under each readout. compare a rule only with C0 of the same readout
+    for name in ["P1", "B2", "B3", "B4", "B6"]:
+        gaps = [mean_acc(name + r, 0.5, 0.0) - mean_acc("C0" + r, None, 0.0) for r in ["", "n", "x"]]
+        print(f"{domain}, k={k}, {name} gap to C0: sum {gaps[0]:+.2f}, norm {gaps[1]:+.2f}, max {gaps[2]:+.2f}")
+    print(f"{domain}, k={k}: C0 {mean_acc('C0', None, 0.0):.2f}%, C0x {mean_acc('C0x', None, 0.0):.2f}%, E1 {mean_acc('E1', None, 0.0):.2f}%, E2 {mean_acc('E2', None, 0.0):.2f}%")
+    for gamma in [16, 64]:
+        print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2s {mean_acc('P2s', None, gamma):.2f}%, P2h {mean_acc('P2h', None, gamma):.2f}%")
 
 if __name__ == "__main__":
     for k in k_values:
