@@ -313,19 +313,68 @@ class Analysis:
         plt.close()
         print(f"Figure saved at {path}")
 
+    @staticmethod
+    def correct_vector(run: dict) -> np.ndarray:
+        """it returns 1 for each test image whose final prediction is correct and 0 otherwise, ordered by image index"""
+        correct = np.zeros(len(run["rows"]))
+        for r in run["rows"]:
+            correct[r["idx"]] = r["pred_final"] == r["label"]
+
+        return correct
+
+    def image_diffs(self, domain: str, name: str, ref: str, rate: float, gamma: float) -> np.ndarray:
+        """it returns, for each test image, how much more often the condition is correct than the reference,
+        averaged over the stream orders, in points. its mean is the paired accuracy difference"""
+        diffs = [Analysis.correct_vector(self.load_run(domain, name, rate, gamma, o)) -
+                 Analysis.correct_vector(self.load_run(domain, ref, rate, gamma, o)) for o in order_seeds]
+
+        return 100 * np.mean(diffs, axis=0)
+
+    def paired_ci(self, name: str, ref: str, rate: float = 0.5, gamma: float = 16, n: int = 1000) -> tuple:
+        """it returns the difference to the reference, averaged over the domains, and its 95% interval.
+        images are resampled with replacement within each domain, and each domain counts equally"""
+        diffs = [self.image_diffs(d, name, ref, rate, gamma) for d in self.domains]
+        rng = np.random.default_rng(42)
+        means = np.zeros(n)
+        for d in diffs:
+            means += np.array([d[rng.integers(0, len(d), len(d))].mean() for _ in range(n)]) / len(diffs)
+
+        return float(np.mean([d.mean() for d in diffs])), float(np.quantile(means, 0.025)), float(np.quantile(means, 0.975))
+
+    def ci_table(self, rate: float = 0.5, gamma: float = 16) -> pd.DataFrame:
+        """it compares each condition with the right reference: selective rules with the cache that admits all
+        images under the same readout, and readout or eviction changes with the ordinary cache"""
+        rules = ["P1", "B2", "B3", "B4", "B6"]
+        comparisons = ([(r, "C0") for r in rules + ["R1"]] + [(r + "n", "C0n") for r in rules] +
+                       [(r + "x", "C0x") for r in rules + ["R1"]] +
+                       [(r, "C0") for r in ["C0n", "C0x", "T0", "E1", "E2", "P2", "P2m", "P2s", "P2h"]] +
+                       [("P2", "P2s"), ("P2", "P2h")])
+        rows = []
+        for name, ref in comparisons:
+            diff, low, high = self.paired_ci(name, ref, rate, gamma)
+            rows.append({"condition": name, "reference": ref, "diff": diff, "low": low, "high": high,
+                         "excludes_0": bool(low > 0 or high < 0)})
+        df = pd.DataFrame(rows)
+
+        path = Path(self.table_dir, f"ci_{self.model_name}_rate{rate}_gamma{gamma}.csv")
+        df.round(3).to_csv(path, index=False)
+        print(f"Table saved at {path}")
+
+        return df
+
 def main(model_name: str, k: int, dataset: str, frac: float) -> None:
     ana = Analysis(model_name=model_name, k=k, dataset=dataset, frac=frac)
-    print(ana.signal_table().round(3).to_string(index=False))
-    ana.plot_js_hist()
-    ana.plot_within_bin()
+    # print(ana.signal_table().round(3).to_string(index=False))
+    # ana.plot_js_hist()
+    # ana.plot_within_bin()
+    # acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
+    # print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
+    # print(ana.cache_table(rate=0.5, gamma=16).round(2).to_string(index=False))
+    # ana.plot_acc_vs_rate()
+    # ana.plot_gamma(rate=0.5)
 
-    acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
-    print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
-
-    print(ana.cache_table(rate=0.5, gamma=16).round(2).to_string(index=False))
-
-    ana.plot_acc_vs_rate()
-    ana.plot_gamma(rate=0.5)
+    print(f"{model_name}, {dataset}, k={k}")
+    print(ana.ci_table(rate=0.5, gamma=16).round(2).to_string(index=False))
 
 if __name__ == "__main__":
     for model_name in model_names:
