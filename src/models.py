@@ -181,6 +181,11 @@ class CLIPModel:
             norm_entropy = signals["entropy"][i] / np.log(len(state["class_means"]))
             threshold = np.clip(state["class_means"][signals["pred"][i]] + state["offset"], 0, 1)
             return norm_entropy <= threshold
+        if rule == "rescue":
+            if signals["entropy"][i] <= state["low"]:
+                return True
+            # medium entropy images enter only if both views agree and JS is low
+            return bool(signals["entropy"][i] <= state["high"] and signals["agree"][i] and signals["js"][i] <= state["js"])
         raise ValueError(f"Unknown rule: {rule}!")
 
     @staticmethod
@@ -266,13 +271,20 @@ def main(model_name: str, domain: str, n_images: int) -> None:
     # print(f"mass, gamma 2: {CLIPModel.read_cache(cache, query, beta=5.0, gamma=2.0, readout='mass')} (expected [3.827 0.173])")
     # print(f"mass, gamma 0: {CLIPModel.read_cache(cache, query, beta=5.0, gamma=0.0, readout='mass')} (expected [3. 1.])")
 
-    # class 0 has entries with similarity 1, 1 and 0.6, class 1 has one entry with similarity 0.8
-    cache = CLIPModel.new_cache(num_classes=2, k=3, dim=2)
-    for i, (label, sim) in enumerate([(0, 1.0), (0, 1.0), (0, 0.6), (1, 0.8)]):
-        CLIPModel.add_to_cache(cache, np.array([sim, np.sqrt(1 - sim**2)]), label, entropy=0.1, js=0.0, idx=i)
-    query = np.array([1.0, 0.0])
-    print(f"sum: {CLIPModel.read_cache(cache, query, beta=5.0)} (expected [2.135 0.368])")
-    print(f"max: {CLIPModel.read_cache(cache, query, beta=5.0, readout='max')} (expected [1. 0.368])")
+    # # class 0 has entries with similarity 1, 1 and 0.6, class 1 has one entry with similarity 0.8
+    # cache = CLIPModel.new_cache(num_classes=2, k=3, dim=2)
+    # for i, (label, sim) in enumerate([(0, 1.0), (0, 1.0), (0, 0.6), (1, 0.8)]):
+    #     CLIPModel.add_to_cache(cache, np.array([sim, np.sqrt(1 - sim**2)]), label, entropy=0.1, js=0.0, idx=i)
+    # query = np.array([1.0, 0.0])
+    # print(f"sum: {CLIPModel.read_cache(cache, query, beta=5.0)} (expected [2.135 0.368])")
+    # print(f"max: {CLIPModel.read_cache(cache, query, beta=5.0, readout='max')} (expected [1. 0.368])")
+
+    # low entropy, rescued, views disagree, JS too high, entropy too high
+    state = {"low": 1.0, "high": 2.0, "js": 0.01}
+    signals = {"entropy": np.array([0.5, 1.5, 1.5, 1.5, 2.5]), "agree": np.array([True, True, False, True, True]),
+               "js": np.array([0.05, 0.005, 0.005, 0.05, 0.0])}
+    allowed = [CLIPModel.is_allowed("rescue", signals, i, state) for i in range(5)]
+    print(f"rescue: {allowed} (expected [True, True, False, False, False])")
 
 if __name__ == "__main__":
     main("vitb16", "Art", 64)

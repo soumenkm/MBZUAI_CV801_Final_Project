@@ -14,6 +14,9 @@ gamma_grid = [1, 4, 16, 64, 256]   # wide because JS is small for most images
 order_seeds = list(range(10))
 adaptive_lam = 0.05
 evict_lam = 4.0   # E2 replaces by entropy + evict_lam * JS. fixed in advance, E1 already counts JS once
+rescue_low = 0.5    # R1 admits every image below this dev entropy quantile
+rescue_high = 0.8   # and images up to this quantile only if both views agree and JS is low
+rescue_js = 0.5     # JS quantile among dev images between the two entropy quantiles
 
 # rule: who may enter, readout: how votes are added ("sum", "norm", "mass" or "max"),
 # evict: which value decides replacement (default "entropy"), score: what the readout weight uses (default "js")
@@ -55,5 +58,12 @@ conditions = {
 
     # same weight values as JS readout, but given to entries at random within a class (P2s) or by entropy rank (P2h)
     "P2s": {"rule": "always", "readout": "sum", "score": "shuffled_js", "use_gamma": True},
-    "P2h": {"rule": "always", "readout": "sum", "score": "entropy_ranked", "use_gamma": True}
+    "P2h": {"rule": "always", "readout": "sum", "score": "entropy_ranked", "use_gamma": True},
+
+    # JS used only for medium entropy images, where it carries some information
+    "R1": {"rule": "rescue", "readout": "sum", "use_gamma": False},
+    "R1x": {"rule": "rescue", "readout": "max", "use_gamma": False},
+
+    # ordinary cache with the TDA order, so each image votes for itself
+    "T0": {"rule": "always", "readout": "sum", "use_gamma": False, "insert_first": True}
 }

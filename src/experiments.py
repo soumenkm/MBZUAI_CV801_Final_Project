@@ -4,8 +4,7 @@ from pathlib import Path
 from tqdm import tqdm
 from data import OfficeHomeDataset
 from models import CLIPModel
-from config import domains, k_values, alpha, beta, target_rates, gamma_grid, order_seeds, adaptive_lam, evict_lam, conditions
-
+from config import domains, k_values, alpha, beta, target_rates, gamma_grid, order_seeds, adaptive_lam, evict_lam, rescue_low, rescue_high, rescue_js, conditions
 import json
 
 class Experiments:
@@ -81,22 +80,27 @@ class Experiments:
         return CLIPModel.get_signals(p0, p1)
 
     def run_stream(self, rule: str, state: dict, gamma: float, alpha_used: float, order_seed: int,
-                   readout: str = "sum", evict_keys: np.ndarray = None, scores: np.ndarray = None) -> tuple:
+                   readout: str = "sum", evict_keys: np.ndarray = None, scores: np.ndarray = None,
+                   insert_first: bool = False) -> tuple:
         """it runs one pass over the test split in the given order. for each image it first predicts with
         the cache built from the earlier images, and only then decides whether the image goes into the cache.
+        with insert_first, it stores first and then predicts, as TDA does.
         the true label is saved for the analysis but it is never used to make a decision here"""
         feats, signals = self.features["test"], self.signals["test"]
         evict_keys = signals["entropy"] if evict_keys is None else evict_keys
         scores = signals["js"] if scores is None else scores
-    
         cache = CLIPModel.new_cache(num_classes=self.num_classes, k=self.k, dim=feats["feats0"].shape[1])
         order = self.datasets["test"].get_order(order_seed)
         checkpoints = [len(order) // 4, len(order) // 2, len(order)]
 
+        def predict(i):
+            votes = CLIPModel.read_cache(cache, feats["feats0"][i], beta=beta, gamma=gamma, readout=readout)
+            return int((feats["logits0"][i] + alpha_used * votes).argmax())
+
         rows, snapshots = [], {}
         for t, i in enumerate(order):
-            votes = CLIPModel.read_cache(cache, feats["feats0"][i], beta=beta, gamma=gamma, readout=readout)
-            pred_final = int((feats["logits0"][i] + alpha_used * votes).argmax())
+            if not insert_first:
+                pred_final = predict(i)
 
             # the cache always stores the plain CLIP prediction, not the final one, so that
             # changing the readout never changes what gets stored
@@ -106,6 +110,10 @@ class Experiments:
                 action = CLIPModel.add_to_cache(cache, feats["feats0"][i], int(signals["pred"][i]), evict_keys[i], scores[i], i)
             if rule == "adaptive":
                 CLIPModel.update_class_means(state, signals, i)
+
+            # TDA stores first, so the image also votes for itself
+            if insert_first:
+                pred_final = predict(i)
 
             rows.append({
                 "t": t,
@@ -158,7 +166,10 @@ class Experiments:
         if rule == "adaptive":
             start_mean = (dev["entropy"] / np.log(self.num_classes)).mean()
             return {"class_means": np.full(self.num_classes, start_mean), "offset": self.calibrate_offset(rate), "lam": adaptive_lam}
-
+        if rule == "rescue":
+            low, high = np.quantile(dev["entropy"], [rescue_low, rescue_high])
+            medium = (dev["entropy"] > low) & (dev["entropy"] <= high)
+            return {"low": low, "high": high, "js": np.quantile(dev["js"][medium], rescue_js)}
         return {}
 
     def make_scores(self, name: str, seed: int) -> tuple:
@@ -206,11 +217,17 @@ class Experiments:
             alpha_used = 0.0 if name == "B0" else alpha
             state = self.make_state(rule, rate, seed=order_seed)
             evict_keys, scores = self.make_scores(name, seed=order_seed)
-            rows, snapshots = self.run_stream(rule, state, gamma, alpha_used, order_seed, readout, evict_keys, scores)
+            rows, snapshots = self.run_stream(rule, state, gamma, alpha_used, order_seed, readout, evict_keys, scores,
+                                    conditions[name].get("insert_first", False))
+
+            # every test image must have one row, otherwise the run is broken and must not be saved
+            if len(rows) != len(self.datasets["test"]):
+                raise ValueError(f"{name}: {len(rows)} rows for {len(self.datasets['test'])} test images!")
 
             result = {"name": name, "rule": rule, "readout": readout, "evict": conditions[name].get("evict", "entropy"),
-                      "score": conditions[name].get("score", "js"), "rate": rate, "gamma": gamma, "order_seed": order_seed,
-                      "k": self.k, "alpha": alpha_used, "beta": beta, "rows": rows, "snapshots": snapshots}
+                    "rate": rate, "gamma": gamma, "order_seed": order_seed,
+                      "k": self.k, "alpha": alpha_used, "beta": beta, "rows": rows, "snapshots": snapshots,
+                        "score": conditions[name].get("score", "js"), "insert_first": conditions[name].get("insert_first", False),}
             temp_path = path.with_suffix(".temp")
             with open(temp_path, mode="w", encoding="utf-8") as f:
                 json.dump(result, f)
@@ -268,6 +285,11 @@ class Experiments:
             score_same = all(load(n, None, gamma, order_seed)["snapshots"] == c0 for n in ["P2s", "P2h"])
             print(f"order {order_seed}: max stores the same as sum: {max_same}, P2s and P2h store the same as C0: {score_same}")
 
+        for order_seed in order_seeds:
+            same_t0 = load("T0", None, 0.0, order_seed)["snapshots"] == load("C0", None, 0.0, order_seed)["snapshots"]
+            same_r1 = load("R1x", None, 0.0, order_seed)["snapshots"] == load("R1", None, 0.0, order_seed)["snapshots"]
+            print(f"order {order_seed}: T0 stores the same as C0: {same_t0}, R1x stores the same as R1: {same_r1}")
+
 def main(model_name: str, domain: str, k: int, frac: float) -> None:
     # exp = Experiments(model_name=model_name, domain=domain, frac=frac)
     # for split in ["dev", "test", "heldout"]:
@@ -311,20 +333,26 @@ def main(model_name: str, domain: str, k: int, frac: float) -> None:
     # for gamma in [16, 256]:
     #     print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2m {mean_acc('P2m', None, gamma):.2f}%")
 
-    # shuffled and entropy ranked scores must have the same values as JS
-    s = exp.signals["test"]
-    _, shuffled = exp.make_scores("P2s", seed=0)
-    _, ranked = exp.make_scores("P2h", seed=0)
-    same_per_class = all(np.array_equal(np.sort(shuffled[s["pred"] == c]), np.sort(s["js"][s["pred"] == c])) for c in np.unique(s["pred"]))
-    print(f"{domain}: shuffled JS keeps the values of each class: {same_per_class}, ranked JS has the same values: {np.array_equal(np.sort(ranked), np.sort(s['js']))}")
+    # # shuffled and entropy ranked scores must have the same values as JS
+    # s = exp.signals["test"]
+    # _, shuffled = exp.make_scores("P2s", seed=0)
+    # _, ranked = exp.make_scores("P2h", seed=0)
+    # same_per_class = all(np.array_equal(np.sort(shuffled[s["pred"] == c]), np.sort(s["js"][s["pred"] == c])) for c in np.unique(s["pred"]))
+    # print(f"{domain}: shuffled JS keeps the values of each class: {same_per_class}, ranked JS has the same values: {np.array_equal(np.sort(ranked), np.sort(s['js']))}")
 
-    # gap to C0 under each readout. compare a rule only with C0 of the same readout
-    for name in ["P1", "B2", "B3", "B4", "B6"]:
-        gaps = [mean_acc(name + r, 0.5, 0.0) - mean_acc("C0" + r, None, 0.0) for r in ["", "n", "x"]]
-        print(f"{domain}, k={k}, {name} gap to C0: sum {gaps[0]:+.2f}, norm {gaps[1]:+.2f}, max {gaps[2]:+.2f}")
-    print(f"{domain}, k={k}: C0 {mean_acc('C0', None, 0.0):.2f}%, C0x {mean_acc('C0x', None, 0.0):.2f}%, E1 {mean_acc('E1', None, 0.0):.2f}%, E2 {mean_acc('E2', None, 0.0):.2f}%")
-    for gamma in [16, 64]:
-        print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2s {mean_acc('P2s', None, gamma):.2f}%, P2h {mean_acc('P2h', None, gamma):.2f}%")
+    # # gap to C0 under each readout. compare a rule only with C0 of the same readout
+    # for name in ["P1", "B2", "B3", "B4", "B6"]:
+    #     gaps = [mean_acc(name + r, 0.5, 0.0) - mean_acc("C0" + r, None, 0.0) for r in ["", "n", "x"]]
+    #     print(f"{domain}, k={k}, {name} gap to C0: sum {gaps[0]:+.2f}, norm {gaps[1]:+.2f}, max {gaps[2]:+.2f}")
+    # print(f"{domain}, k={k}: C0 {mean_acc('C0', None, 0.0):.2f}%, C0x {mean_acc('C0x', None, 0.0):.2f}%, E1 {mean_acc('E1', None, 0.0):.2f}%, E2 {mean_acc('E2', None, 0.0):.2f}%")
+    # for gamma in [16, 64]:
+    #     print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2s {mean_acc('P2s', None, gamma):.2f}%, P2h {mean_acc('P2h', None, gamma):.2f}%")
+
+    admitted = np.mean([s["admitted"] for s in summaries if s["name"] == "R1"])
+    print(f"{domain}, k={k}: R1 admits {admitted:.1f}%")
+    print(f"{domain}, k={k}, sum: C0 {mean_acc('C0', None, 0.0):.2f}%, B2 at 50% {mean_acc('B2', 0.5, 0.0):.2f}%, B2 at 75% {mean_acc('B2', 0.75, 0.0):.2f}%, R1 {mean_acc('R1', None, 0.0):.2f}%")
+    print(f"{domain}, k={k}, max: C0x {mean_acc('C0x', None, 0.0):.2f}%, B2x at 50% {mean_acc('B2x', 0.5, 0.0):.2f}%, B2x at 75% {mean_acc('B2x', 0.75, 0.0):.2f}%, R1x {mean_acc('R1x', None, 0.0):.2f}%")
+    print(f"{domain}, k={k}: C0 {mean_acc('C0', None, 0.0):.2f}%, T0 {mean_acc('T0', None, 0.0):.2f}%")
 
 if __name__ == "__main__":
     for k in k_values:
