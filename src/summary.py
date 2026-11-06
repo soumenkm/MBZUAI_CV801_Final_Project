@@ -4,6 +4,9 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from config import model_names, k_values
 
+from scipy.stats import spearmanr
+from config import model_names, k_values, domains
+
 class Summary:
     def __init__(self, rate: float = 0.5, gamma: float = 16) -> None:
         """it puts the interval tables of all backbones, datasets and K values together"""
@@ -95,11 +98,91 @@ class Summary:
         plt.close()
         print(f"Figure saved at {path}")
 
+    def load_entries(self) -> pd.DataFrame:
+        """it reads the entry utilities saved by utility.py for every setting and domain. the deciles and
+        ranks are computed inside each cache, so caches of different size and datasets can be compared"""
+        tables = []
+        for model_name, dataset, k in self.settings:
+            for domain in domains[dataset]:
+                path = Path(self.output_dir, "tables", "utility", dataset, f"k{k}", f"entries_{model_name}_{domain.replace(' ', '_')}.csv")
+                df = pd.read_csv(path)
+                df["model"], df["dataset"], df["k"], df["domain"] = model_name, dataset, k, domain
+                tables.append(df)
+        df = pd.concat(tables, ignore_index=True)
+
+        cache = ["model", "dataset", "k", "domain", "condition", "order"]
+        for score in ["utility", "entropy", "js"]:
+            df[f"{score}_rank"] = df.groupby(cache)[score].rank(pct=True)
+        for score in ["entropy", "js"]:
+            # 0 holds the tenth of the entries with the lowest score in their cache
+            df[f"{score}_decile"] = np.minimum((10 * df[f"{score}_rank"]).astype(int), 9)
+
+        return df
+
+    def utility_corr(self, entries: pd.DataFrame, name: str = "C0", n: int = 1000) -> pd.DataFrame:
+        """it returns the spearman correlation of entry utility with entropy and with JS, for each setting and
+        for all settings together, with a 95% bootstrap interval over entries. positive means entries with
+        high entropy (or high JS) help more"""
+        entries = entries[entries["condition"] == name]
+        groups = [(f"{self.short[d]} {self.backbone[m]} K={k}",
+                   entries[(entries["model"] == m) & (entries["dataset"] == d) & (entries["k"] == k)])
+                  for m, d, k in self.settings] + [("All", entries)]
+        rng = np.random.default_rng(42)
+        rows = []
+        for setting, df in groups:
+            row = {"setting": setting, "entries": len(df)}
+            u = df["utility_rank"].to_numpy()
+            for score in ["entropy", "js"]:
+                s = df[f"{score}_rank"].to_numpy()
+                values = []
+                for _ in range(n):
+                    idx = rng.integers(0, len(u), len(u))
+                    values.append(spearmanr(u[idx], s[idx]).statistic)
+                row[f"corr_{score}"] = spearmanr(u, s).statistic
+                row[f"corr_{score}_low"], row[f"corr_{score}_high"] = np.quantile(values, [0.025, 0.975])
+            rows.append(row)
+        table = pd.DataFrame(rows)
+
+        path = Path(self.table_dir, f"utility_corr_{name}.csv")
+        table.round(4).to_csv(path, index=False)
+        print(f"Table saved at {path}")
+
+        return table
+
+    def plot_utility(self, entries: pd.DataFrame, name: str = "C0") -> None:
+        """it plots the mean utility of stored entries in each entropy decile (top) and JS decile (bottom)
+        of their cache, one panel per dataset and one line per backbone and K"""
+        entries = entries[entries["condition"] == name]
+        fig, axs = plt.subplots(2, len(self.short), figsize=(4 * len(self.short), 6.5), squeeze=False)
+        for row, score in enumerate(["entropy", "js"]):
+            for col, dataset in enumerate(self.short):
+                ax = axs[row][col]
+                for model_name in model_names:
+                    for k in k_values:
+                        df = entries[(entries["model"] == model_name) & (entries["dataset"] == dataset) & (entries["k"] == k)]
+                        means = df.groupby(f"{score}_decile")["utility"].mean()
+                        ax.plot(means.index + 1, means.values, marker="o", label=f"{self.backbone[model_name]} K={k}")
+                ax.axhline(0, color="gray", linestyle=":")
+                ax.set_title(self.short[dataset])
+                ax.set_xlabel(f"{'Entropy' if score == 'entropy' else 'JS'} decile of the entry in its cache (1 = lowest)")
+                ax.set_ylabel("Mean utility (points)")
+                ax.legend(fontsize=7)
+        plt.tight_layout()
+
+        path = Path(self.fig_dir, f"utility_{name}.png")
+        plt.savefig(path, dpi=300)
+        plt.close()
+        print(f"Figure saved at {path}")
+
 def main() -> None:
     summary = Summary(rate=0.5, gamma=16)
-    df = summary.collect()
-    print(summary.key_table(df).to_string(index=False))
-    summary.plot_readout(df, rules=["P1", "B2"])
+    # df = summary.collect()
+    # print(summary.key_table(df).to_string(index=False))
+    # summary.plot_readout(df, rules=["P1", "B2"])
+
+    entries = summary.load_entries()
+    print(summary.utility_corr(entries, name="C0").round(3).to_string(index=False))
+    summary.plot_utility(entries, name="C0")
 
 if __name__ == "__main__":
     main()
