@@ -80,7 +80,7 @@ class Experiments:
 
         return CLIPModel.get_signals(p0, p1)
 
-    def run_stream(self, rule: str, state: dict, gamma: float, alpha_used: float, order_seed: int) -> tuple:
+    def run_stream(self, rule: str, state: dict, gamma: float, alpha_used: float, order_seed: int, readout: str = "sum") -> tuple:
         """it runs one pass over the test split in the given order. for each image it first predicts with
         the cache built from the earlier images, and only then decides whether the image goes into the cache.
         the true label is saved for the analysis but it is never used to make a decision here"""
@@ -91,7 +91,7 @@ class Experiments:
 
         rows, snapshots = [], {}
         for t, i in enumerate(order):
-            votes = CLIPModel.read_cache(cache, feats["feats0"][i], beta=beta, gamma=gamma)
+            votes = CLIPModel.read_cache(cache, feats["feats0"][i], beta=beta, gamma=gamma, readout=readout)
             pred_final = int((feats["logits0"][i] + alpha_used * votes).argmax())
 
             # the cache always stores the plain CLIP prediction, not the final one, so that
@@ -165,12 +165,13 @@ class Experiments:
         """it runs one condition (for example P1) at one admission rate, gamma and stream order,
         saves the full result and returns a short summary"""
         rule = conditions[name]["rule"]
+        readout = conditions[name]["readout"]
         # B0 is zero-shot CLIP, the cache is still filled but it has no effect on the prediction
         alpha_used = 0.0 if name == "B0" else alpha
         state = self.make_state(rule, rate, seed=order_seed)
-        rows, snapshots = self.run_stream(rule, state, gamma, alpha_used, order_seed)
+        rows, snapshots = self.run_stream(rule, state, gamma, alpha_used, order_seed, readout)
 
-        result = {"name": name, "rule": rule, "rate": rate, "gamma": gamma, "order_seed": order_seed,
+        result = {"name": name, "rule": rule, "readout": readout, "rate": rate, "gamma": gamma, "order_seed": order_seed,
                   "k": self.k, "alpha": alpha_used, "beta": beta, "rows": rows, "snapshots": snapshots}
         path = self.run_path(name, rate, gamma, order_seed)
         temp_path = path.with_suffix(".temp")
@@ -216,6 +217,13 @@ class Experiments:
             p1_vs_p3 = all(load("P1", r, 0.0, order_seed)["snapshots"] == load("P3", r, gamma, order_seed)["snapshots"] for r in target_rates)
             print(f"order {order_seed}: C0 and P2 store the same: {c0_vs_p2}, P1 and P3 store the same: {p1_vs_p3}")
 
+        for order_seed in order_seeds:
+            c0 = load("C0", None, 0.0, order_seed)["snapshots"]
+            norm_same = load("C0n", None, 0.0, order_seed)["snapshots"] == c0 and all(
+                load("P1n", r, 0.0, order_seed)["snapshots"] == load("P1", r, 0.0, order_seed)["snapshots"] for r in target_rates)
+            mass_same = load("P2m", None, gamma, order_seed)["snapshots"] == c0
+            print(f"order {order_seed}: norm stores the same as sum: {norm_same}, P2m stores the same as C0: {mass_same}")
+
 def main(model_name: str, domain: str, k: int, frac: float) -> None:
     # exp = Experiments(model_name=model_name, domain=domain, frac=frac)
     # for split in ["dev", "test", "heldout"]:
@@ -245,10 +253,19 @@ def main(model_name: str, domain: str, k: int, frac: float) -> None:
     summaries = exp.run_all()
     exp.check_invariants()
 
-    for name in conditions:
-        picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
-        print(f"{domain}, k={k}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
+    # for name in conditions:
+    #     picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
+    #     print(f"{domain}, k={k}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
 
+    def mean_acc(name, rate, gamma):
+        picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, rate] and s["gamma"] in [0.0, gamma]]
+        return np.mean([s["accuracy"] for s in picked])
+
+    # if the loss of selective admission comes from sparse buckets being outvoted, norm should close most of the gap to C0
+    for name in ["C0", "P1", "B2", "B3", "B4", "B6"]:
+        print(f"{domain}, k={k}, {name}: sum {mean_acc(name, 0.5, 0.0):.2f}%, norm {mean_acc(name + 'n', 0.5, 0.0):.2f}%")
+    for gamma in [16, 256]:
+        print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2m {mean_acc('P2m', None, gamma):.2f}%")
 
 if __name__ == "__main__":
     for k in k_values:

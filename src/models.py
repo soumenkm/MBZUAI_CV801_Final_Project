@@ -128,20 +128,32 @@ class CLIPModel:
         return action
 
     @staticmethod
-    def read_cache(cache: dict, feat: np.ndarray, beta: float, gamma: float = 0.0) -> np.ndarray:
+    def read_cache(cache: dict, feat: np.ndarray, beta: float, gamma: float = 0.0, readout: str = "sum") -> np.ndarray:
         """it returns the vote of the cache for each class. entries that look like the image vote more.
-        with gamma > 0, entries whose two views disagreed vote less. gamma = 0 is the ordinary cache"""
+        with gamma > 0, entries whose two views disagreed vote less. gamma = 0 is the ordinary cache.
+        readout "sum" adds the votes, "norm" lets each class vote as if its bucket were full,
+        and "mass" rescales the votes so that the JS weights don't change the total vote"""
         votes = np.zeros(cache["num_classes"])
         filled = cache["labels"] >= 0
         if not filled.any():
             return votes
 
+        labels = cache["labels"][filled]
         sims = cache["feats"][filled] @ feat
         # similarity 1 gives weight 1, lower similarity gives a weight close to 0 (same as TDA and Tip-Adapter)
         weights = np.exp(-beta * (1 - sims))
-        weights = weights * np.exp(-gamma * cache["js"][filled] / np.log(2))
+        js_weights = weights * np.exp(-gamma * cache["js"][filled] / np.log(2))
         # add each entry's weight to the vote of its stored label
-        np.add.at(votes, cache["labels"][filled], weights)
+        np.add.at(votes, labels, js_weights)
+
+        if readout == "norm":
+            counts = np.bincount(labels, minlength=cache["num_classes"])
+            votes[counts > 0] *= cache["k"] / counts[counts > 0]
+        elif readout == "mass":
+            # weights is never 0 because the similarity is at least -1, so the sum is positive
+            votes *= weights.sum() / js_weights.sum()
+        elif readout != "sum":
+            raise ValueError(f"Unknown readout: {readout}!")
 
         return votes
 
@@ -173,66 +185,80 @@ class CLIPModel:
         state["class_means"][label] = (1 - state["lam"]) * state["class_means"][label] + state["lam"] * norm_entropy
 
 def main(model_name: str, domain: str, n_images: int) -> None:
-    model = CLIPModel(model_name=model_name)
-    ds = OfficeHomeDataset(domain=domain, split="dev")
-    text_feats = model.encode_text(ds.prompt_names())
+    # model = CLIPModel(model_name=model_name)
+    # ds = OfficeHomeDataset(domain=domain, split="dev")
+    # text_feats = model.encode_text(ds.prompt_names())
 
-    items = [ds[i] for i in ds.get_order(order_seed=0)[:n_images]]
-    images = [OfficeHomeDataset._load_image(i["image_path"]) for i in items]
-    flipped = [OfficeHomeDataset._flip_image(i) for i in images]
-    labels = torch.tensor([i["label"] for i in items], device=model.device)
+    # items = [ds[i] for i in ds.get_order(order_seed=0)[:n_images]]
+    # images = [OfficeHomeDataset._load_image(i["image_path"]) for i in items]
+    # flipped = [OfficeHomeDataset._flip_image(i) for i in images]
+    # labels = torch.tensor([i["label"] for i in items], device=model.device)
 
-    pred_orig = CLIPModel.get_logits(model.encode_images(images), text_feats).argmax(dim=-1)
-    pred_flip = CLIPModel.get_logits(model.encode_images(flipped), text_feats).argmax(dim=-1)
-    print(f"{model_name}, {domain}: text feats {tuple(text_feats.shape)}, {n_images} images, logit scale in model: {model.model.logit_scale.exp().item():.1f}")
-    print(f"accuracy original: {(pred_orig == labels).float().mean().item() * 100:.1f}%, flipped: {(pred_flip == labels).float().mean().item() * 100:.1f}%, views agree: {(pred_orig == pred_flip).float().mean().item() * 100:.1f}%")
+    # pred_orig = CLIPModel.get_logits(model.encode_images(images), text_feats).argmax(dim=-1)
+    # pred_flip = CLIPModel.get_logits(model.encode_images(flipped), text_feats).argmax(dim=-1)
+    # print(f"{model_name}, {domain}: text feats {tuple(text_feats.shape)}, {n_images} images, logit scale in model: {model.model.logit_scale.exp().item():.1f}")
+    # print(f"accuracy original: {(pred_orig == labels).float().mean().item() * 100:.1f}%, flipped: {(pred_flip == labels).float().mean().item() * 100:.1f}%, views agree: {(pred_orig == pred_flip).float().mean().item() * 100:.1f}%")
 
-    # checking JS on examples worked out by hand
-    same = CLIPModel.js_divergence(np.array([[0.8, 0.2]]), np.array([[0.8, 0.2]]))[0]
-    opposite = CLIPModel.js_divergence(np.array([[1.0, 0.0]]), np.array([[0.0, 1.0]]))[0]
-    close = CLIPModel.js_divergence(np.array([[0.8, 0.2]]), np.array([[0.6, 0.4]]))[0]
-    print(f"JS same: {same:.4f} (expected 0), opposite: {opposite:.4f} (expected 0.6931), close: {close:.4f} (expected 0.0242)")
+    # # checking JS on examples worked out by hand
+    # same = CLIPModel.js_divergence(np.array([[0.8, 0.2]]), np.array([[0.8, 0.2]]))[0]
+    # opposite = CLIPModel.js_divergence(np.array([[1.0, 0.0]]), np.array([[0.0, 1.0]]))[0]
+    # close = CLIPModel.js_divergence(np.array([[0.8, 0.2]]), np.array([[0.6, 0.4]]))[0]
+    # print(f"JS same: {same:.4f} (expected 0), opposite: {opposite:.4f} (expected 0.6931), close: {close:.4f} (expected 0.0242)")
 
-    p0 = CLIPModel.get_probs(CLIPModel.get_logits(model.encode_images(images), text_feats))
-    p1 = CLIPModel.get_probs(CLIPModel.get_logits(model.encode_images(flipped), text_feats))
-    signals = CLIPModel.get_signals(p0, p1)
-    print(f"mean entropy: {signals['entropy'].mean():.3f}, mean JS: {signals['js'].mean():.4f}, JS < 0.01: {(signals['js'] < 0.01).mean() * 100:.1f}%, views agree: {signals['agree'].mean() * 100:.1f}%")
+    # p0 = CLIPModel.get_probs(CLIPModel.get_logits(model.encode_images(images), text_feats))
+    # p1 = CLIPModel.get_probs(CLIPModel.get_logits(model.encode_images(flipped), text_feats))
+    # signals = CLIPModel.get_signals(p0, p1)
+    # print(f"mean entropy: {signals['entropy'].mean():.3f}, mean JS: {signals['js'].mean():.4f}, JS < 0.01: {(signals['js'] < 0.01).mean() * 100:.1f}%, views agree: {signals['agree'].mean() * 100:.1f}%")
 
-    # example: the query is [1, 0] and the three stored entries have similarity 0.95, 0.70 and 0.20 with it
-    cache = CLIPModel.new_cache(num_classes=3, k=1, dim=2)
-    for label, sim in [(0, 0.95), (1, 0.70), (2, 0.20)]:
-        CLIPModel.add_to_cache(cache, np.array([sim, np.sqrt(1 - sim**2)]), label, entropy=0.1, js=0.0, idx=label)
-    base = np.array([2.0, 2.1, 0.0])
-    print(f"scores with cache: {base + CLIPModel.read_cache(cache, np.array([1.0, 0.0]), beta=5.0)}, expected [2.779 2.323 0.018]")
+    # # example: the query is [1, 0] and the three stored entries have similarity 0.95, 0.70 and 0.20 with it
+    # cache = CLIPModel.new_cache(num_classes=3, k=1, dim=2)
+    # for label, sim in [(0, 0.95), (1, 0.70), (2, 0.20)]:
+    #     CLIPModel.add_to_cache(cache, np.array([sim, np.sqrt(1 - sim**2)]), label, entropy=0.1, js=0.0, idx=label)
+    # base = np.array([2.0, 2.1, 0.0])
+    # print(f"scores with cache: {base + CLIPModel.read_cache(cache, np.array([1.0, 0.0]), beta=5.0)}, expected [2.779 2.323 0.018]")
 
-    # one class with 2 slots: 0.2 and 0.45 fill it, 0.3 replaces 0.45, 0.6 is rejected
-    cache = CLIPModel.new_cache(num_classes=2, k=2, dim=2)
-    actions = [CLIPModel.add_to_cache(cache, np.array([1.0, 0.0]), 0, entropy=e, js=0.0, idx=i) for i, e in enumerate([0.2, 0.45, 0.3, 0.6])]
-    print(f"actions: {actions}, entropies kept: {cache['entropy'][:2]}, expected [0.2 0.3]")
+    # # one class with 2 slots: 0.2 and 0.45 fill it, 0.3 replaces 0.45, 0.6 is rejected
+    # cache = CLIPModel.new_cache(num_classes=2, k=2, dim=2)
+    # actions = [CLIPModel.add_to_cache(cache, np.array([1.0, 0.0]), 0, entropy=e, js=0.0, idx=i) for i, e in enumerate([0.2, 0.45, 0.3, 0.6])]
+    # print(f"actions: {actions}, entropies kept: {cache['entropy'][:2]}, expected [0.2 0.3]")
 
-    # with gamma = 2, an entry with JS = ln 2 should vote exp(-2) = 0.135 times as much as with gamma = 0
-    cache["js"][:2] = np.log(2)
-    print(f"vote with gamma 0: {CLIPModel.read_cache(cache, np.array([1.0, 0.0]), beta=5.0)[0]:.3f}, gamma 2: {CLIPModel.read_cache(cache, np.array([1.0, 0.0]), beta=5.0, gamma=2.0)[0]:.3f} (expected 2.000 and 0.271)")
+    # # with gamma = 2, an entry with JS = ln 2 should vote exp(-2) = 0.135 times as much as with gamma = 0
+    # cache["js"][:2] = np.log(2)
+    # print(f"vote with gamma 0: {CLIPModel.read_cache(cache, np.array([1.0, 0.0]), beta=5.0)[0]:.3f}, gamma 2: {CLIPModel.read_cache(cache, np.array([1.0, 0.0]), beta=5.0, gamma=2.0)[0]:.3f} (expected 2.000 and 0.271)")
 
-    # random predictions for 1000 images, just to check that the rules admit the expected share
-    rng = np.random.default_rng(0)
-    p0 = rng.dirichlet(np.full(65, 0.3), size=1000)
-    p1 = rng.dirichlet(np.full(65, 0.3), size=1000)
-    signals = CLIPModel.get_signals(p0, p1)
+    # # random predictions for 1000 images, just to check that the rules admit the expected share
+    # rng = np.random.default_rng(0)
+    # p0 = rng.dirichlet(np.full(65, 0.3), size=1000)
+    # p1 = rng.dirichlet(np.full(65, 0.3), size=1000)
+    # signals = CLIPModel.get_signals(p0, p1)
 
-    state = {"threshold": np.quantile(signals["js"], 0.5)}
-    js_rate = np.mean([CLIPModel.is_allowed("js", signals, i, state) for i in range(1000)])
-    state = {"rng": np.random.default_rng(0), "rate": 0.25}
-    random_rate = np.mean([CLIPModel.is_allowed("random", signals, i, state) for i in range(1000)])
-    print(f"js rule admits {js_rate * 100:.1f}% (expected 50%), random rule admits {random_rate * 100:.1f}% (expected about 25%)")
+    # state = {"threshold": np.quantile(signals["js"], 0.5)}
+    # js_rate = np.mean([CLIPModel.is_allowed("js", signals, i, state) for i in range(1000)])
+    # state = {"rng": np.random.default_rng(0), "rate": 0.25}
+    # random_rate = np.mean([CLIPModel.is_allowed("random", signals, i, state) for i in range(1000)])
+    # print(f"js rule admits {js_rate * 100:.1f}% (expected 50%), random rule admits {random_rate * 100:.1f}% (expected about 25%)")
 
-    # class mean 0.3 and offset 0.05 give threshold 0.35, so normalised entropy 0.32 is allowed
-    state = {"class_means": np.full(65, 0.3), "offset": 0.05, "lam": 0.05}
-    one = {"entropy": np.array([0.32 * np.log(65)]), "pred": np.array([4])}
-    allowed = CLIPModel.is_allowed("adaptive", one, 0, state)
-    CLIPModel.update_class_means(state, one, 0)
-    print(f"adaptive allowed: {allowed} (expected True), new class mean: {state['class_means'][4]:.3f} (expected 0.301)")
+    # # class mean 0.3 and offset 0.05 give threshold 0.35, so normalised entropy 0.32 is allowed
+    # state = {"class_means": np.full(65, 0.3), "offset": 0.05, "lam": 0.05}
+    # one = {"entropy": np.array([0.32 * np.log(65)]), "pred": np.array([4])}
+    # allowed = CLIPModel.is_allowed("adaptive", one, 0, state)
+    # CLIPModel.update_class_means(state, one, 0)
+    # print(f"adaptive allowed: {allowed} (expected True), new class mean: {state['class_means'][4]:.3f} (expected 0.301)")
+
+    # class 0 has 3 entries and class 1 has 1 entry, all with similarity 1, so each weight is 1
+    cache = CLIPModel.new_cache(num_classes=2, k=3, dim=2)
+    for i, label in enumerate([0, 0, 0, 1]):
+        CLIPModel.add_to_cache(cache, np.array([1.0, 0.0]), label, entropy=0.1, js=0.0, idx=i)
+    query = np.array([1.0, 0.0])
+    print(f"sum: {CLIPModel.read_cache(cache, query, beta=5.0)} (expected [3. 1.]), norm: {CLIPModel.read_cache(cache, query, beta=5.0, readout='norm')} (expected [3. 3.])")
+
+    # the class 1 entry has JS = ln 2, so with gamma 2 it votes exp(-2) = 0.135. the total vote is then 3.135 instead of 4,
+    # so mass multiplies both votes by 4 / 3.135
+    cache["js"][3] = np.log(2)
+    print(f"sum, gamma 2: {CLIPModel.read_cache(cache, query, beta=5.0, gamma=2.0)} (expected [3. 0.135])")
+    print(f"mass, gamma 2: {CLIPModel.read_cache(cache, query, beta=5.0, gamma=2.0, readout='mass')} (expected [3.827 0.173])")
+    print(f"mass, gamma 0: {CLIPModel.read_cache(cache, query, beta=5.0, gamma=0.0, readout='mass')} (expected [3. 1.])")
 
 if __name__ == "__main__":
     main("vitb16", "Art", 64)
-    main("vitb16", "Clipart", 64)
+    # main("vitb16", "Clipart", 64)
