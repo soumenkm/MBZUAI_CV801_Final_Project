@@ -6,6 +6,7 @@ from config import domains, split_fracs
 import random
 import math
 from PIL import Image, ImageOps
+import numpy as np
 
 class OfficeHomeDataset(Dataset):
     def __init__(self, domain: str, split: str, frac: float = 1.0, seed: int = 42) -> None:
@@ -124,27 +125,35 @@ def main(domain: str) -> None:
     # print(f"{domain}: {len(ds)} images, {len(ds.class_names)} classes")
     # print(ds[0], image.size)
 
-    ds_all = OfficeHomeDataset(domain=domain, split="all")
-    split_ids = {s: {i["image_id"] for i in OfficeHomeDataset(domain=domain, split=s).data} for s in ["dev", "test", "heldout"]}
-    all_ids = {i["image_id"] for i in ds_all.data}
-    overlap = (split_ids["dev"] & split_ids["test"]) | (split_ids["dev"] & split_ids["heldout"]) | (split_ids["test"] & split_ids["heldout"])
-    missing = all_ids - (split_ids["dev"] | split_ids["test"] | split_ids["heldout"])
+    # ds_all = OfficeHomeDataset(domain=domain, split="all")
+    # split_ids = {s: {i["image_id"] for i in OfficeHomeDataset(domain=domain, split=s).data} for s in ["dev", "test", "heldout"]}
+    # all_ids = {i["image_id"] for i in ds_all.data}
+    # overlap = (split_ids["dev"] & split_ids["test"]) | (split_ids["dev"] & split_ids["heldout"]) | (split_ids["test"] & split_ids["heldout"])
+    # missing = all_ids - (split_ids["dev"] | split_ids["test"] | split_ids["heldout"])
 
-    sizes = ", ".join(f"{s}: {len(v)}" for s, v in split_ids.items())
-    print(f"{domain}: {len(ds_all)} images, {len(ds_all.class_names)} classes, {sizes}, overlap: {len(overlap)}, missing: {len(missing)}")
+    # sizes = ", ".join(f"{s}: {len(v)}" for s, v in split_ids.items())
+    # print(f"{domain}: {len(ds_all)} images, {len(ds_all.class_names)} classes, {sizes}, overlap: {len(overlap)}, missing: {len(missing)}")
 
-    ds = OfficeHomeDataset(domain=domain, split="test")
-    print(f"order 0: {ds.get_order(order_seed=0)[:5]}, order 1: {ds.get_order(order_seed=1)[:5]}")
+    # ds = OfficeHomeDataset(domain=domain, split="test")
+    # print(f"order 0: {ds.get_order(order_seed=0)[:5]}, order 1: {ds.get_order(order_seed=1)[:5]}")
+
+    # ds = OfficeHomeDataset(domain=domain, split="test")
+    # image = OfficeHomeDataset._load_image(ds[0]["image_path"])
+    # flipped = OfficeHomeDataset._flip_image(image)
+    # # flipping twice should give back the same image
+    # same = list(OfficeHomeDataset._flip_image(flipped).getdata()) == list(image.getdata())
+    # print(f"{domain}: {ds.prompt_names()[:3]}, flip size: {flipped.size}, flip twice same: {same}")
+
+    # ds_small = OfficeHomeDataset(domain=domain, split="test", frac=0.1)
+    # print(f"{domain}: test with frac=0.1 has {len(ds_small)} of {len(ds)} images")
 
     ds = OfficeHomeDataset(domain=domain, split="test")
     image = OfficeHomeDataset._load_image(ds[0]["image_path"])
     flipped = OfficeHomeDataset._flip_image(image)
-    # flipping twice should give back the same image
-    same = list(OfficeHomeDataset._flip_image(flipped).getdata()) == list(image.getdata())
-    print(f"{domain}: {ds.prompt_names()[:3]}, flip size: {flipped.size}, flip twice same: {same}")
-
-    ds_small = OfficeHomeDataset(domain=domain, split="test", frac=0.1)
-    print(f"{domain}: test with frac=0.1 has {len(ds_small)} of {len(ds)} images")
+   
+    same = np.array_equal(np.array(OfficeHomeDataset._flip_image(flipped)), np.array(image))
+    changed = not np.array_equal(np.array(flipped), np.array(image))
+    print(f"{domain}: test images: {len(ds)}, flip twice same: {same}, one flip changes: {changed}")
 
 if __name__ == "__main__":
     for domain in domains:

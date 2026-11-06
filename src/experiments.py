@@ -4,23 +4,26 @@ from pathlib import Path
 from tqdm import tqdm
 from data import OfficeHomeDataset
 from models import CLIPModel
-from config import domains, k, alpha, beta, target_rates, gamma_grid, order_seeds, adaptive_lam, conditions
+from config import domains, k_values, alpha, beta, target_rates, gamma_grid, order_seeds, adaptive_lam, conditions
+
 import json
 
 class Experiments:
-    def __init__(self, model_name: str, domain: str, frac: float = 1.0) -> None:
+    def __init__(self, model_name: str, domain: str, k: int, frac: float = 1.0) -> None:
         """model_name is vitb16 or vitb32, domain is one Office-Home domain.
         frac is fraction of each split in 0 to 1.0, use it only for quick testing"""
         self.model_name = model_name
         self.domain = domain
         self.frac = frac
+        self.k = k
 
         self.cwd = Path.cwd()
         self.output_dir = Path(self.cwd, "outputs")
         self.feature_dir = Path(self.output_dir, "features")
         self.feature_dir.mkdir(parents=True, exist_ok=True)
 
-        self.run_dir = Path(self.output_dir, "runs", f"{self.model_name}_{self.domain.replace(' ', '_')}_frac{self.frac}")
+        # features don't depend on k but runs depend
+        self.run_dir = Path(self.output_dir, "runs", f"{self.model_name}_{self.domain.replace(' ', '_')}_k{self.k}_frac{self.frac}")
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         # CLIP is loaded only when features have to be extracted
@@ -82,7 +85,7 @@ class Experiments:
         the cache built from the earlier images, and only then decides whether the image goes into the cache.
         the true label is saved for the analysis but it is never used to make a decision here"""
         feats, signals = self.features["test"], self.signals["test"]
-        cache = CLIPModel.new_cache(num_classes=self.num_classes, k=k, dim=feats["feats0"].shape[1])
+        cache = CLIPModel.new_cache(num_classes=self.num_classes, k=self.k, dim=feats["feats0"].shape[1])
         order = self.datasets["test"].get_order(order_seed)
         checkpoints = [len(order) // 4, len(order) // 2, len(order)]
 
@@ -168,7 +171,7 @@ class Experiments:
         rows, snapshots = self.run_stream(rule, state, gamma, alpha_used, order_seed)
 
         result = {"name": name, "rule": rule, "rate": rate, "gamma": gamma, "order_seed": order_seed,
-                  "k": k, "alpha": alpha_used, "beta": beta, "rows": rows, "snapshots": snapshots}
+                  "k": self.k, "alpha": alpha_used, "beta": beta, "rows": rows, "snapshots": snapshots}
         path = self.run_path(name, rate, gamma, order_seed)
         temp_path = path.with_suffix(".temp")
         with open(temp_path, mode="w", encoding="utf-8") as f:
@@ -213,29 +216,41 @@ class Experiments:
             p1_vs_p3 = all(load("P1", r, 0.0, order_seed)["snapshots"] == load("P3", r, gamma, order_seed)["snapshots"] for r in target_rates)
             print(f"order {order_seed}: C0 and P2 store the same: {c0_vs_p2}, P1 and P3 store the same: {p1_vs_p3}")
 
-def main(model_name: str, domain: str, frac: float) -> None:
-    exp = Experiments(model_name=model_name, domain=domain, frac=frac)
-    for split in ["dev", "test", "heldout"]:
-        features = exp.load_features(split)
-        zero_shot = 100 * np.mean(features["logits0"].argmax(axis=1) == features["labels"])
-        agree = 100 * np.mean(features["logits0"].argmax(axis=1) == features["logits1"].argmax(axis=1))
-        print(f"{domain}, {split}: feats {features['feats0'].shape}, zero-shot {zero_shot:.2f}%, views agree {agree:.1f}%")
+def main(model_name: str, domain: str, k: int, frac: float) -> None:
+    # exp = Experiments(model_name=model_name, domain=domain, frac=frac)
+    # for split in ["dev", "test", "heldout"]:
+    #     features = exp.load_features(split)
+    #     zero_shot = 100 * np.mean(features["logits0"].argmax(axis=1) == features["labels"])
+    #     agree = 100 * np.mean(features["logits0"].argmax(axis=1) == features["logits1"].argmax(axis=1))
+    #     print(f"{domain}, {split}: feats {features['feats0'].shape}, zero-shot {zero_shot:.2f}%, views agree {agree:.1f}%")
 
-    # with alpha 0 the cache has no effect, so it must give exactly the zero-shot accuracy
-    zero_shot = 100 * np.mean(exp.signals["test"]["pred"] == exp.features["test"]["labels"])
-    for order_seed in [0, 1, 2]:
-        b0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=0.0, order_seed=order_seed)
-        c0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=alpha, order_seed=order_seed)
-        print(f"{domain}, order {order_seed}: B0 {Experiments.get_accuracy(b0_rows):.2f}% (zero-shot {zero_shot:.2f}%), C0 {Experiments.get_accuracy(c0_rows):.2f}%, cache size at end: {c0_rows[-1]['cache_size']} of {k * exp.num_classes}")
+    # # with alpha 0 the cache has no effect, so it must give exactly the zero-shot accuracy
+    # zero_shot = 100 * np.mean(exp.signals["test"]["pred"] == exp.features["test"]["labels"])
+    # for order_seed in [0, 1, 2]:
+    #     b0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=0.0, order_seed=order_seed)
+    #     c0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=alpha, order_seed=order_seed)
+    #     print(f"{domain}, order {order_seed}: B0 {Experiments.get_accuracy(b0_rows):.2f}% (zero-shot {zero_shot:.2f}%), C0 {Experiments.get_accuracy(c0_rows):.2f}%, cache size at end: {c0_rows[-1]['cache_size']} of {k * exp.num_classes}")
 
+    # summaries = exp.run_all()
+    # exp.check_invariants()
+
+    # # short table at the 50% admission rate and gamma 16, averaged over the stream orders
+    # for name in conditions:
+    #     picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
+    #     print(f"{domain}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
+
+    exp = Experiments(model_name=model_name, domain=domain, k=k, frac=frac)
+
+    print(f"{domain}, k={k}: runs are saved in {exp.run_dir}")
     summaries = exp.run_all()
     exp.check_invariants()
 
-    # short table at the 50% admission rate and gamma 16, averaged over the stream orders
     for name in conditions:
         picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
-        print(f"{domain}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
+        print(f"{domain}, k={k}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
+
 
 if __name__ == "__main__":
-    for domain in domains:
-        main("vitb16", domain, 1.0)
+    for k in k_values:
+        for domain in domains:
+            main("vitb16", domain, k, 1.0)

@@ -5,20 +5,21 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.metrics import roc_auc_score
 from models import CLIPModel
-from config import domains, conditions, target_rates, gamma_grid, order_seeds
+from config import domains, conditions, target_rates, gamma_grid, order_seeds, k_values
 import json
 
 class Analysis:
-    def __init__(self, model_name: str, frac: float = 1.0) -> None:
-        """model_name and frac pick which saved features and runs are analysed"""
+    def __init__(self, model_name: str, k: int, frac: float = 1.0) -> None:
+        """model_name, k and frac pick which saved features and runs are analysed"""
         self.model_name = model_name
+        self.k = k
         self.frac = frac
 
         self.cwd = Path.cwd()
         self.output_dir = Path(self.cwd, "outputs")
         self.feature_dir = Path(self.output_dir, "features")
-        self.table_dir = Path(self.output_dir, "tables")
-        self.fig_dir = Path(self.output_dir, "figures")
+        self.table_dir = Path(self.output_dir, "tables", f"k{self.k}")
+        self.fig_dir = Path(self.output_dir, "figures", f"k{self.k}")
         self.table_dir.mkdir(parents=True, exist_ok=True)
         self.fig_dir.mkdir(parents=True, exist_ok=True)
 
@@ -160,7 +161,7 @@ class Analysis:
         rate, gamma = Analysis.settings(name, rate, gamma)
         key = (domain, name, rate, gamma, order_seed)
         if key not in self.runs:
-            path = Path(self.output_dir, "runs", self.domain_tag(domain), f"{name}_rate{rate}_gamma{gamma}_order{order_seed}.json")
+            path = Path(self.output_dir, "runs", f"{self.model_name}_{domain.replace(' ', '_')}_k{self.k}_frac{self.frac}", f"{name}_rate{rate}_gamma{gamma}_order{order_seed}.json")
             with open(path, mode="r", encoding="utf-8") as f:
                 self.runs[key] = json.load(f)
 
@@ -307,8 +308,21 @@ class Analysis:
         plt.close()
         print(f"Figure saved at {path}")
 
-def main(model_name: str, frac: float) -> None:
-    ana = Analysis(model_name=model_name, frac=frac)
+def main(model_name: str, k: int, frac: float) -> None:
+    # ana = Analysis(model_name=model_name, frac=frac)
+    # print(ana.signal_table().round(3).to_string(index=False))
+    # ana.plot_js_hist()
+    # ana.plot_within_bin()
+
+    # acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
+    # print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
+
+    # print(ana.cache_table(rate=0.5, gamma=16).round(2).to_string(index=False))
+
+    # ana.plot_acc_vs_rate()
+    # ana.plot_gamma(rate=0.5)
+
+    ana = Analysis(model_name=model_name, k=k, frac=frac)
     print(ana.signal_table().round(3).to_string(index=False))
     ana.plot_js_hist()
     ana.plot_within_bin()
@@ -322,4 +336,5 @@ def main(model_name: str, frac: float) -> None:
     ana.plot_gamma(rate=0.5)
 
 if __name__ == "__main__":
-    main("vitb16", 1.0)
+    for k in k_values:
+        main("vitb16", k, 1.0)

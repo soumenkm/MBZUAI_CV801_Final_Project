@@ -5,13 +5,13 @@ model_name_map = {"vitb16": "clip-vit-base-patch16", "vitb32": "clip-vit-base-pa
 template = "a photo of a {}."
 logit_scale = 100.0
 
-k = 3          # slots per class, TDA uses 3 for every dataset
+k_values = [3, 8]          # slots per class, TDA uses 3 for every dataset
 alpha = 2.0    # TDA positive cache, ImageNet config
 beta = 5.0
 
 target_rates = [0.25, 0.5, 0.75]
 gamma_grid = [1, 4, 16, 64, 256]   # wide because JS is small for most images
-order_seeds = [0, 1, 2]
+order_seeds = list(range(10))
 adaptive_lam = 0.05
 conditions = {
     "B0": {"rule": "always", "use_gamma": False},
