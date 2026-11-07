@@ -386,7 +386,9 @@ class Analysis:
         comparisons = ([(r, "C0") for r in rules + ["R1"]] + [(r + "n", "C0n") for r in rules] +
                        [(r + "x", "C0x") for r in rules + ["R1"]] +
                        [(r, "C0") for r in ["C0n", "C0x", "T0", "E1", "E2", "P2", "P2m", "P2s", "P2h"]] +
-                       [("P2", "P2s"), ("P2", "P2h")])
+                       [("P2", "P2s"), ("P2", "P2h")] + 
+                        [(r, "C0") for r in ["C0n", "C0x", "T0", "E1", "E1c", "E2", "P2", "P2m", "P2s", "P2h"]] +
+                       [("P2", "P2s"), ("P2", "P2h"), ("E1c", "E1")])
         rows = []
         for name, ref in comparisons:
             diff, low, high = self.paired_ci(name, ref, rate, gamma)
@@ -395,6 +397,22 @@ class Analysis:
         df = pd.DataFrame(rows)
 
         path = Path(self.table_dir, f"ci_{self.model_name}_rate{rate}_gamma{gamma}.csv")
+        df.round(3).to_csv(path, index=False)
+        print(f"Table saved at {path}")
+
+        return df
+
+    def crop_eviction_table(self) -> pd.DataFrame:
+        """it compares eviction with the crop view (E1c) with the ordinary cache and with eviction
+        using the flip (E1), with paired 95% intervals"""
+        rows = []
+        for name, ref in [("E1", "C0"), ("E1c", "C0"), ("E1c", "E1")]:
+            diff, low, high = self.paired_ci(name, ref)
+            rows.append({"model": self.model_name, "k": self.k, "condition": name, "reference": ref,
+                         "diff": diff, "low": low, "high": high, "excludes_0": bool(low > 0 or high < 0)})
+        df = pd.DataFrame(rows)
+
+        path = Path(self.table_dir, f"crop_eviction_{self.model_name}.csv")
         df.round(3).to_csv(path, index=False)
         print(f"Table saved at {path}")
 
@@ -420,14 +438,26 @@ class Analysis:
 #             for k in k_values:
 #                 main(model_name, k, dataset, 1.0)
 
-def main(model_name: str, dataset: str) -> None:
-    # k only sets the output folder, the signals do not depend on it
-    ana = Analysis(model_name=model_name, k=3, dataset=dataset)
-    print(ana.signal_table(view="crop")[["domain", "views_agree", "mean_js", "auroc_js", "auroc_js_within_entropy_bins", "auroc_js_within_low", "auroc_js_within_high"]])
-    print(ana.compare_views())
+# def main(model_name: str, dataset: str) -> None:
+#     # k only sets the output folder, the signals do not depend on it
+#     ana = Analysis(model_name=model_name, k=3, dataset=dataset)
+#     print(ana.signal_table(view="crop")[["domain", "views_agree", "mean_js", "auroc_js", "auroc_js_within_entropy_bins", "auroc_js_within_low", "auroc_js_within_high"]])
+#     print(ana.compare_views())
+
+
+# if __name__ == "__main__":
+#     for model_name in model_names:
+#         for dataset in domains:
+#             main(model_name=model_name, dataset=dataset)
+
+def main(model_name: str, k: int, dataset: str) -> None:
+    ana = Analysis(model_name=model_name, k=k, dataset=dataset)
+    print(f"{dataset}")
+    print(ana.crop_eviction_table())
 
 
 if __name__ == "__main__":
     for model_name in model_names:
-        for dataset in domains:
-            main(model_name=model_name, dataset=dataset)
+        for k in k_values:
+            for dataset in ["imagenetr", "imageneta", "officehome"]:
+                main(model_name, k, dataset)

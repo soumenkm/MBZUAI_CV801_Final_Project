@@ -68,7 +68,10 @@ conditions = {
     "R1x": {"rule": "rescue", "readout": "max", "use_gamma": False},
 
     # ordinary cache with the TDA order, so each image votes for itself
-    "T0": {"rule": "always", "readout": "sum", "use_gamma": False, "insert_first": True}
+    "T0": {"rule": "always", "readout": "sum", "use_gamma": False, "insert_first": True},
+
+    # E1 with the crop view instead of the flip, only the eviction key changes
+    "E1c": {"rule": "always", "readout": "sum", "use_gamma": False, "evict": "entropy_of_mean", "view": "crop"},
 }
 
 # third view: a random resized crop, the same crop for an image in every run

@@ -34,6 +34,9 @@ class Experiments:
         self.features = {s: self.load_features(s) for s in ["dev", "test"]}
         self.signals = {s: self.get_signals(s) for s in ["dev", "test"]}
 
+        # signals with the crop as the second view, loaded only when a condition needs them
+        self.crop_signals = None
+
     def feature_path(self, split: str) -> Path:
         """it returns where the features of a split are saved"""
         return Path(self.feature_dir, f"{self.model_name}_{self.domain.replace(' ', '_')}_frac{self.frac}_{split}.npz")
@@ -107,6 +110,20 @@ class Experiments:
         }
         np.savez(self.crop_path(split), **features)
         print(f"Crop features saved at {self.crop_path(split)}")
+
+    def get_crop_signals(self) -> dict:
+        """it computes the test signals with the crop as the second view. the prediction and the entropy
+        still come from the original view, so only the two-view signals change"""
+        if self.crop_signals is None:
+            if not self.crop_path("test").exists():
+                self.extract_crop_features("test")
+            with np.load(self.crop_path("test")) as f:
+                logits2 = f["logits2"]
+            p0 = CLIPModel.get_probs(torch.from_numpy(self.features["test"]["logits0"]))
+            p2 = CLIPModel.get_probs(torch.from_numpy(logits2))
+            self.crop_signals = CLIPModel.get_signals(p0, p2)
+
+        return self.crop_signals
 
     def get_signals(self, split: str) -> dict:
         """it computes the prediction, entropy, JS and the other signals for every image of a split"""
@@ -211,7 +228,8 @@ class Experiments:
     def make_scores(self, name: str, seed: int) -> tuple:
         """it returns two values per test image: the eviction key (lower is kept when a bucket is full)
         and the score used by the readout weight. both are computed before the run, without labels"""
-        s = self.signals["test"]
+        view = conditions[name].get("view", "flip")
+        s = self.signals["test"] if view == "flip" else self.get_crop_signals()
         evict = conditions[name].get("evict", "entropy")
         evict_keys = {"entropy": s["entropy"], "entropy_of_mean": s["entropy_of_mean"],
                       "entropy_js": s["entropy"] + evict_lam * s["js"]}
@@ -261,9 +279,9 @@ class Experiments:
                 raise ValueError(f"{name}: {len(rows)} rows for {len(self.datasets['test'])} test images!")
 
             result = {"name": name, "rule": rule, "readout": readout, "evict": conditions[name].get("evict", "entropy"),
-                    "rate": rate, "gamma": gamma, "order_seed": order_seed,
-                      "k": self.k, "alpha": alpha_used, "beta": beta, "rows": rows, "snapshots": snapshots,
-                        "score": conditions[name].get("score", "js"), "insert_first": conditions[name].get("insert_first", False),}
+                      "score": conditions[name].get("score", "js"), "view": conditions[name].get("view", "flip"),
+                      "rate": rate, "gamma": gamma, "order_seed": order_seed,
+                      "k": self.k, "alpha": alpha_used, "beta": beta, "rows": rows, "snapshots": snapshots}
             temp_path = path.with_suffix(".temp")
             with open(temp_path, mode="w", encoding="utf-8") as f:
                 json.dump(result, f)
@@ -401,24 +419,49 @@ class Experiments:
 #                     main(model_name, dataset, domain, k, 1.0)
 
 
-def main(model_name: str, dataset: str) -> None:
-    for domain in domains[dataset]:
-        # k has no effect here, only the features are used
-        exp = Experiments(model_name=model_name, domain=domain, k=3, dataset=dataset)
-        for split in ["dev", "test"]:
-            exp.extract_crop_features(split)
+# def main(model_name: str, dataset: str) -> None:
+#     for domain in domains[dataset]:
+#         # k has no effect here, only the features are used
+#         exp = Experiments(model_name=model_name, domain=domain, k=3, dataset=dataset)
+#         for split in ["dev", "test"]:
+#             exp.extract_crop_features(split)
 
-        with np.load(exp.crop_path("test")) as f:
-            pred2 = f["logits2"].argmax(axis=-1)
-        labels = exp.features["test"]["labels"]
-        pred0 = exp.features["test"]["logits0"].argmax(axis=-1)
-        pred1 = exp.features["test"]["logits1"].argmax(axis=-1)
-        print(f"{model_name} {domain}: zero-shot original {100 * (pred0 == labels).mean():.2f}, "
-              f"crop {100 * (pred2 == labels).mean():.2f}, top class kept by flip {100 * (pred0 == pred1).mean():.1f}, "
-              f"by crop {100 * (pred0 == pred2).mean():.1f}")
+#         with np.load(exp.crop_path("test")) as f:
+#             pred2 = f["logits2"].argmax(axis=-1)
+#         labels = exp.features["test"]["labels"]
+#         pred0 = exp.features["test"]["logits0"].argmax(axis=-1)
+#         pred1 = exp.features["test"]["logits1"].argmax(axis=-1)
+#         print(f"{model_name} {domain}: zero-shot original {100 * (pred0 == labels).mean():.2f}, "
+#               f"crop {100 * (pred2 == labels).mean():.2f}, top class kept by flip {100 * (pred0 == pred1).mean():.1f}, "
+#               f"by crop {100 * (pred0 == pred2).mean():.1f}")
+
+
+# if __name__ == "__main__":
+#     for model_name in model_names:
+#         for dataset in domains:
+#             main(model_name=model_name, dataset=dataset)
+
+def main(model_name: str, dataset: str, domain: str, k: int) -> None:
+    exp = Experiments(model_name=model_name, domain=domain, k=k, dataset=dataset)
+    summaries = [exp.run_condition("E1c", None, 0.0, o) for o in order_seeds]
+    # C0 and E1 are already saved, so these are only loaded
+    c0 = [exp.run_condition("C0", None, 0.0, o) for o in order_seeds]
+    e1 = [exp.run_condition("E1", None, 0.0, o) for o in order_seeds]
+
+    # the crop changes only the eviction key, so the prediction and entropy of every image must be the same
+    crop, flip = exp.get_crop_signals(), exp.signals["test"]
+    same_base = np.array_equal(crop["pred"], flip["pred"]) and np.allclose(crop["entropy"], flip["entropy"])
+    changed = 100 * np.mean(~np.isclose(crop["entropy_of_mean"], flip["entropy_of_mean"]))
+    print(f"{model_name} {domain} k={k}: same prediction and entropy: {same_base}, eviction key changed for {changed:.1f}% of images")
+
+    def mean_acc(s):
+        return np.mean([r["accuracy"] for r in s])
+    print(f"{model_name} {domain} k={k}: C0 {mean_acc(c0):.2f}, E1 {mean_acc(e1):.2f}, E1c {mean_acc(summaries):.2f}")
 
 
 if __name__ == "__main__":
     for model_name in model_names:
-        for dataset in domains:
-            main(model_name=model_name, dataset=dataset)
+        for dataset in ["imagenetr", "imageneta", "officehome"]:
+            for k in k_values:
+                for domain in domains[dataset]:
+                    main(model_name, dataset, domain, k)
