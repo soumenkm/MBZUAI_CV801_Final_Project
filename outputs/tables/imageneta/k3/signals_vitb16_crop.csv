@@ -1,0 +1,3 @@
+domain,zero_shot_acc,mean_js,js_below_0.01,views_agree,auroc_entropy,auroc_mean_entropy,auroc_entropy_of_mean,auroc_js,auroc_agree,auroc_js_within_entropy_bins,auroc_js_within_low,auroc_js_within_high
+ImageNet-A,47.5794,0.0902,17.3122,66.9442,0.7554,0.7513,0.7534,0.6624,0.6449,0.5578,0.5401,0.574
+Mean,47.5794,0.0902,17.3122,66.9442,0.7554,0.7513,0.7534,0.6624,0.6449,0.5578,0.5401,0.574

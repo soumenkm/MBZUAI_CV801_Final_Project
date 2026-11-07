@@ -73,6 +73,41 @@ class Experiments:
 
         return features
 
+    def crop_path(self, split: str) -> Path:
+        """it returns where the crop view features of a split are saved, next to the original features"""
+        return Path(self.feature_dir, f"{self.model_name}_{self.domain.replace(' ', '_')}_frac{self.frac}_{split}_crop.npz")
+
+    def extract_crop_features(self, split: str, batch_size: int = 128) -> None:
+        """it runs CLIP on the crop view of every image in a split and saves the features and logits.
+        it is a separate file, so the original and flipped features are never touched"""
+        if self.crop_path(split).exists():
+            print(f"Crop features already saved at {self.crop_path(split)}")
+            return
+        if self.model is None:
+            self.model = CLIPModel(model_name=self.model_name)
+        ds = self.datasets[split]
+        text_feats = self.model.encode_text(ds.prompt_names())
+
+        feats2 = []
+        for start in tqdm(range(0, len(ds), batch_size), f"Cropping {self.domain} {split}", unit="batches"):
+            items = [ds[i] for i in range(start, min(start + batch_size, len(ds)))]
+            images = [OfficeHomeDataset._crop_image(OfficeHomeDataset._load_image(i["image_path"]), i["image_id"]) for i in items]
+            feats2.append(self.model.encode_images(images))
+        feats2 = torch.cat(feats2)
+
+        image_ids = np.array([i["image_id"] for i in ds.data])
+        # the rows must line up with the saved original features, otherwise the views are mixed up
+        if not np.array_equal(image_ids, self.features[split]["image_ids"]):
+            raise ValueError(f"Image order of the crop view differs from the saved features for {split}!")
+
+        features = {
+            "feats2": feats2.cpu().numpy(),
+            "logits2": CLIPModel.get_logits(feats2, text_feats).cpu().numpy(),
+            "image_ids": image_ids
+        }
+        np.savez(self.crop_path(split), **features)
+        print(f"Crop features saved at {self.crop_path(split)}")
+
     def get_signals(self, split: str) -> dict:
         """it computes the prediction, entropy, JS and the other signals for every image of a split"""
         p0 = CLIPModel.get_probs(torch.from_numpy(self.features[split]["logits0"]))
@@ -291,76 +326,99 @@ class Experiments:
             same_r1 = load("R1x", None, 0.0, order_seed)["snapshots"] == load("R1", None, 0.0, order_seed)["snapshots"]
             print(f"order {order_seed}: T0 stores the same as C0: {same_t0}, R1x stores the same as R1: {same_r1}")
 
-def main(model_name: str, dataset: str, domain: str, k: int, frac: float) -> None:
-    # exp = Experiments(model_name=model_name, domain=domain, frac=frac)
-    # for split in ["dev", "test", "heldout"]:
-    #     features = exp.load_features(split)
-    #     zero_shot = 100 * np.mean(features["logits0"].argmax(axis=1) == features["labels"])
-    #     agree = 100 * np.mean(features["logits0"].argmax(axis=1) == features["logits1"].argmax(axis=1))
-    #     print(f"{domain}, {split}: feats {features['feats0'].shape}, zero-shot {zero_shot:.2f}%, views agree {agree:.1f}%")
+# def main(model_name: str, dataset: str, domain: str, k: int, frac: float) -> None:
+#     # exp = Experiments(model_name=model_name, domain=domain, frac=frac)
+#     # for split in ["dev", "test", "heldout"]:
+#     #     features = exp.load_features(split)
+#     #     zero_shot = 100 * np.mean(features["logits0"].argmax(axis=1) == features["labels"])
+#     #     agree = 100 * np.mean(features["logits0"].argmax(axis=1) == features["logits1"].argmax(axis=1))
+#     #     print(f"{domain}, {split}: feats {features['feats0'].shape}, zero-shot {zero_shot:.2f}%, views agree {agree:.1f}%")
 
-    # # with alpha 0 the cache has no effect, so it must give exactly the zero-shot accuracy
-    # zero_shot = 100 * np.mean(exp.signals["test"]["pred"] == exp.features["test"]["labels"])
-    # for order_seed in [0, 1, 2]:
-    #     b0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=0.0, order_seed=order_seed)
-    #     c0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=alpha, order_seed=order_seed)
-    #     print(f"{domain}, order {order_seed}: B0 {Experiments.get_accuracy(b0_rows):.2f}% (zero-shot {zero_shot:.2f}%), C0 {Experiments.get_accuracy(c0_rows):.2f}%, cache size at end: {c0_rows[-1]['cache_size']} of {k * exp.num_classes}")
+#     # # with alpha 0 the cache has no effect, so it must give exactly the zero-shot accuracy
+#     # zero_shot = 100 * np.mean(exp.signals["test"]["pred"] == exp.features["test"]["labels"])
+#     # for order_seed in [0, 1, 2]:
+#     #     b0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=0.0, order_seed=order_seed)
+#     #     c0_rows, _ = exp.run_stream("always", {}, gamma=0.0, alpha_used=alpha, order_seed=order_seed)
+#     #     print(f"{domain}, order {order_seed}: B0 {Experiments.get_accuracy(b0_rows):.2f}% (zero-shot {zero_shot:.2f}%), C0 {Experiments.get_accuracy(c0_rows):.2f}%, cache size at end: {c0_rows[-1]['cache_size']} of {k * exp.num_classes}")
 
-    # summaries = exp.run_all()
-    # exp.check_invariants()
+#     # summaries = exp.run_all()
+#     # exp.check_invariants()
 
-    # # short table at the 50% admission rate and gamma 16, averaged over the stream orders
-    # for name in conditions:
-    #     picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
-    #     print(f"{domain}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
+#     # # short table at the 50% admission rate and gamma 16, averaged over the stream orders
+#     # for name in conditions:
+#     #     picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
+#     #     print(f"{domain}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
 
-    exp = Experiments(model_name=model_name, domain=domain, k=k, frac=frac, dataset=dataset)
-    print(f"{model_name}, {domain}, k={k}: {exp.num_classes} classes, {len(exp.datasets['test'])} test images, runs in {exp.run_dir}")
-    summaries = exp.run_all()
-    exp.check_invariants()
+#     exp = Experiments(model_name=model_name, domain=domain, k=k, frac=frac, dataset=dataset)
+#     print(f"{model_name}, {domain}, k={k}: {exp.num_classes} classes, {len(exp.datasets['test'])} test images, runs in {exp.run_dir}")
+#     summaries = exp.run_all()
+#     exp.check_invariants()
 
-    # for name in conditions:
-    #     picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
-    #     print(f"{domain}, k={k}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
+#     # for name in conditions:
+#     #     picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, 0.5] and s["gamma"] in [0.0, 16]]
+#     #     print(f"{domain}, k={k}, {name}: accuracy {np.mean([s['accuracy'] for s in picked]):.2f}%, admitted {np.mean([s['admitted'] for s in picked]):.1f}%")
 
-    def mean_acc(name, rate, gamma):
-        picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, rate] and s["gamma"] in [0.0, gamma]]
-        return np.mean([s["accuracy"] for s in picked])
+#     def mean_acc(name, rate, gamma):
+#         picked = [s for s in summaries if s["name"] == name and s["rate"] in [None, rate] and s["gamma"] in [0.0, gamma]]
+#         return np.mean([s["accuracy"] for s in picked])
 
-    # # if the loss of selective admission comes from sparse buckets being outvoted, norm should close most of the gap to C0
-    # for name in ["C0", "P1", "B2", "B3", "B4", "B6"]:
-    #     print(f"{domain}, k={k}, {name}: sum {mean_acc(name, 0.5, 0.0):.2f}%, norm {mean_acc(name + 'n', 0.5, 0.0):.2f}%")
-    # for gamma in [16, 256]:
-    #     print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2m {mean_acc('P2m', None, gamma):.2f}%")
+#     # # if the loss of selective admission comes from sparse buckets being outvoted, norm should close most of the gap to C0
+#     # for name in ["C0", "P1", "B2", "B3", "B4", "B6"]:
+#     #     print(f"{domain}, k={k}, {name}: sum {mean_acc(name, 0.5, 0.0):.2f}%, norm {mean_acc(name + 'n', 0.5, 0.0):.2f}%")
+#     # for gamma in [16, 256]:
+#     #     print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2m {mean_acc('P2m', None, gamma):.2f}%")
 
-    # # shuffled and entropy ranked scores must have the same values as JS
-    # s = exp.signals["test"]
-    # _, shuffled = exp.make_scores("P2s", seed=0)
-    # _, ranked = exp.make_scores("P2h", seed=0)
-    # same_per_class = all(np.array_equal(np.sort(shuffled[s["pred"] == c]), np.sort(s["js"][s["pred"] == c])) for c in np.unique(s["pred"]))
-    # print(f"{domain}: shuffled JS keeps the values of each class: {same_per_class}, ranked JS has the same values: {np.array_equal(np.sort(ranked), np.sort(s['js']))}")
+#     # # shuffled and entropy ranked scores must have the same values as JS
+#     # s = exp.signals["test"]
+#     # _, shuffled = exp.make_scores("P2s", seed=0)
+#     # _, ranked = exp.make_scores("P2h", seed=0)
+#     # same_per_class = all(np.array_equal(np.sort(shuffled[s["pred"] == c]), np.sort(s["js"][s["pred"] == c])) for c in np.unique(s["pred"]))
+#     # print(f"{domain}: shuffled JS keeps the values of each class: {same_per_class}, ranked JS has the same values: {np.array_equal(np.sort(ranked), np.sort(s['js']))}")
 
-    # # gap to C0 under each readout. compare a rule only with C0 of the same readout
-    # for name in ["P1", "B2", "B3", "B4", "B6"]:
-    #     gaps = [mean_acc(name + r, 0.5, 0.0) - mean_acc("C0" + r, None, 0.0) for r in ["", "n", "x"]]
-    #     print(f"{domain}, k={k}, {name} gap to C0: sum {gaps[0]:+.2f}, norm {gaps[1]:+.2f}, max {gaps[2]:+.2f}")
-    # print(f"{domain}, k={k}: C0 {mean_acc('C0', None, 0.0):.2f}%, C0x {mean_acc('C0x', None, 0.0):.2f}%, E1 {mean_acc('E1', None, 0.0):.2f}%, E2 {mean_acc('E2', None, 0.0):.2f}%")
-    # for gamma in [16, 64]:
-    #     print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2s {mean_acc('P2s', None, gamma):.2f}%, P2h {mean_acc('P2h', None, gamma):.2f}%")
+#     # # gap to C0 under each readout. compare a rule only with C0 of the same readout
+#     # for name in ["P1", "B2", "B3", "B4", "B6"]:
+#     #     gaps = [mean_acc(name + r, 0.5, 0.0) - mean_acc("C0" + r, None, 0.0) for r in ["", "n", "x"]]
+#     #     print(f"{domain}, k={k}, {name} gap to C0: sum {gaps[0]:+.2f}, norm {gaps[1]:+.2f}, max {gaps[2]:+.2f}")
+#     # print(f"{domain}, k={k}: C0 {mean_acc('C0', None, 0.0):.2f}%, C0x {mean_acc('C0x', None, 0.0):.2f}%, E1 {mean_acc('E1', None, 0.0):.2f}%, E2 {mean_acc('E2', None, 0.0):.2f}%")
+#     # for gamma in [16, 64]:
+#     #     print(f"{domain}, k={k}, gamma {gamma}: P2 {mean_acc('P2', None, gamma):.2f}%, P2s {mean_acc('P2s', None, gamma):.2f}%, P2h {mean_acc('P2h', None, gamma):.2f}%")
 
-    # admitted = np.mean([s["admitted"] for s in summaries if s["name"] == "R1"])
-    # print(f"{domain}, k={k}: R1 admits {admitted:.1f}%")
-    # print(f"{domain}, k={k}, sum: C0 {mean_acc('C0', None, 0.0):.2f}%, B2 at 50% {mean_acc('B2', 0.5, 0.0):.2f}%, B2 at 75% {mean_acc('B2', 0.75, 0.0):.2f}%, R1 {mean_acc('R1', None, 0.0):.2f}%")
-    # print(f"{domain}, k={k}, max: C0x {mean_acc('C0x', None, 0.0):.2f}%, B2x at 50% {mean_acc('B2x', 0.5, 0.0):.2f}%, B2x at 75% {mean_acc('B2x', 0.75, 0.0):.2f}%, R1x {mean_acc('R1x', None, 0.0):.2f}%")
-    # print(f"{domain}, k={k}: C0 {mean_acc('C0', None, 0.0):.2f}%, T0 {mean_acc('T0', None, 0.0):.2f}%")
+#     # admitted = np.mean([s["admitted"] for s in summaries if s["name"] == "R1"])
+#     # print(f"{domain}, k={k}: R1 admits {admitted:.1f}%")
+#     # print(f"{domain}, k={k}, sum: C0 {mean_acc('C0', None, 0.0):.2f}%, B2 at 50% {mean_acc('B2', 0.5, 0.0):.2f}%, B2 at 75% {mean_acc('B2', 0.75, 0.0):.2f}%, R1 {mean_acc('R1', None, 0.0):.2f}%")
+#     # print(f"{domain}, k={k}, max: C0x {mean_acc('C0x', None, 0.0):.2f}%, B2x at 50% {mean_acc('B2x', 0.5, 0.0):.2f}%, B2x at 75% {mean_acc('B2x', 0.75, 0.0):.2f}%, R1x {mean_acc('R1x', None, 0.0):.2f}%")
+#     # print(f"{domain}, k={k}: C0 {mean_acc('C0', None, 0.0):.2f}%, T0 {mean_acc('T0', None, 0.0):.2f}%")
 
-    names = ["B0", "C0", "C0x", "T0", "P1", "P1x", "B2", "B2x", "B4", "B4x", "R1x"]
-    print(f"{model_name}, {domain}, k={k}: " + ", ".join(f"{n} {mean_acc(n, 0.5, 0.0):.2f}" for n in names))
+#     names = ["B0", "C0", "C0x", "T0", "P1", "P1x", "B2", "B2x", "B4", "B4x", "R1x"]
+#     print(f"{model_name}, {domain}, k={k}: " + ", ".join(f"{n} {mean_acc(n, 0.5, 0.0):.2f}" for n in names))
+
+
+# if __name__ == "__main__":
+#     for model_name in model_names:
+#         for dataset in ["officehome", "imageneta", "imagenetr"]:
+#             for k in k_values:
+#                 for domain in domains[dataset]:
+#                     main(model_name, dataset, domain, k, 1.0)
+
+
+def main(model_name: str, dataset: str) -> None:
+    for domain in domains[dataset]:
+        # k has no effect here, only the features are used
+        exp = Experiments(model_name=model_name, domain=domain, k=3, dataset=dataset)
+        for split in ["dev", "test"]:
+            exp.extract_crop_features(split)
+
+        with np.load(exp.crop_path("test")) as f:
+            pred2 = f["logits2"].argmax(axis=-1)
+        labels = exp.features["test"]["labels"]
+        pred0 = exp.features["test"]["logits0"].argmax(axis=-1)
+        pred1 = exp.features["test"]["logits1"].argmax(axis=-1)
+        print(f"{model_name} {domain}: zero-shot original {100 * (pred0 == labels).mean():.2f}, "
+              f"crop {100 * (pred2 == labels).mean():.2f}, top class kept by flip {100 * (pred0 == pred1).mean():.1f}, "
+              f"by crop {100 * (pred0 == pred2).mean():.1f}")
 
 
 if __name__ == "__main__":
     for model_name in model_names:
-        for dataset in ["officehome", "imageneta", "imagenetr"]:
-            for k in k_values:
-                for domain in domains[dataset]:
-                    main(model_name, dataset, domain, k, 1.0)
+        for dataset in domains:
+            main(model_name=model_name, dataset=dataset)

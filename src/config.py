@@ -70,3 +70,7 @@ conditions = {
     # ordinary cache with the TDA order, so each image votes for itself
     "T0": {"rule": "always", "readout": "sum", "use_gamma": False, "insert_first": True}
 }
+
+# third view: a random resized crop, the same crop for an image in every run
+crop_scale = (0.5, 1.0)
+crop_seed = 42

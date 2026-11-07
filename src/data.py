@@ -1,7 +1,7 @@
 from torch.utils.data import Dataset
 from pathlib import Path
 from PIL import Image
-from config import data_paths, domains, split_fracs
+from config import data_paths, domains, split_fracs, crop_scale, crop_seed
 
 import random
 import math
@@ -103,6 +103,24 @@ class OfficeHomeDataset(Dataset):
         CLIP's center crop is symmetric, so flipping before or after the preprocessing gives the same result."""
         return ImageOps.mirror(image)
 
+    @staticmethod
+    def _crop_image(image: Image, image_id: str, seed: int = crop_seed) -> Image:
+        """it cuts a random part of the image, between crop_scale of its area and with a width to height
+        ratio between 3/4 and 4/3, like the crops used by TPT. the crop depends only on the image id and the seed,
+        so the same image always gets the same crop. CLIP's preprocessing then resizes it to 224"""
+        rng = random.Random(f"{seed}/{image_id}")
+        w, h = image.size
+        for _ in range(10):
+            area = w * h * rng.uniform(*crop_scale)
+            ratio = math.exp(rng.uniform(math.log(3 / 4), math.log(4 / 3)))
+            cw, ch = round(math.sqrt(area * ratio)), round(math.sqrt(area / ratio))
+            if 0 < cw <= w and 0 < ch <= h:
+                left, top = rng.randint(0, w - cw), rng.randint(0, h - ch)
+                return image.crop((left, top, left + cw, top + ch))
+
+        # if no crop fits after 10 tries, the whole image is used
+        return image
+
     def __len__(self) -> int:
         return len(self.data)
 
@@ -156,10 +174,19 @@ def main(dataset: str, domain: str) -> None:
     # changed = not np.array_equal(np.array(flipped), np.array(image))
     # print(f"{domain}: test images: {len(ds)}, flip twice same: {same}, one flip changes: {changed}")
 
-    sizes = {s: len(OfficeHomeDataset(domain=domain, split=s, dataset=dataset)) for s in ["all", "dev", "test", "heldout"]}
+    # sizes = {s: len(OfficeHomeDataset(domain=domain, split=s, dataset=dataset)) for s in ["all", "dev", "test", "heldout"]}
+    # ds = OfficeHomeDataset(domain=domain, split="test", dataset=dataset)
+    # image = OfficeHomeDataset._load_image(ds[0]["image_path"])
+    # print(f"{dataset}, {domain}: {len(ds.class_names)} classes, {sizes}, first image {image.size}, prompt names: {ds.prompt_names()[:3]}")
+
     ds = OfficeHomeDataset(domain=domain, split="test", dataset=dataset)
     image = OfficeHomeDataset._load_image(ds[0]["image_path"])
-    print(f"{dataset}, {domain}: {len(ds.class_names)} classes, {sizes}, first image {image.size}, prompt names: {ds.prompt_names()[:3]}")
+    crop_a = OfficeHomeDataset._crop_image(image, ds[0]["image_id"])
+    crop_b = OfficeHomeDataset._crop_image(image, ds[0]["image_id"])
+    crop_c = OfficeHomeDataset._crop_image(image, ds[1]["image_id"])
+    same = np.array_equal(np.array(crop_a), np.array(crop_b))
+    share = crop_a.size[0] * crop_a.size[1] / (image.size[0] * image.size[1])
+    print(f"{domain}: image {image.size}, crop {crop_a.size}, area share {share:.2f}, same crop twice: {same}, other image crop {crop_c.size}")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from sklearn.metrics import roc_auc_score
 from models import CLIPModel
 from config import domains, model_names, conditions, target_rates, gamma_grid, order_seeds, k_values
 import json
+from tqdm import tqdm
 
 class Analysis:
     def __init__(self, model_name: str, k: int, dataset: str = "officehome", frac: float = 1.0) -> None:
@@ -33,11 +34,14 @@ class Analysis:
         """it returns the name part shared by the feature files of a domain"""
         return f"{self.model_name}_{domain.replace(' ', '_')}_frac{self.frac}"
 
-    def load_signals(self, domain: str) -> dict:
-        """it loads the saved test features of a domain, computes the signals and marks
-        whether the zero-shot prediction is correct"""
+    def load_signals(self, domain: str, view: str = "flip") -> dict:
+        """it loads the saved test features of a domain, computes the signals and marks whether the
+        zero-shot prediction is correct. view picks the second view: flip or crop"""
         with np.load(Path(self.feature_dir, f"{self.domain_tag(domain)}_test.npz")) as f:
             logits0, logits1, labels = f["logits0"], f["logits1"], f["labels"]
+        if view == "crop":
+            with np.load(Path(self.feature_dir, f"{self.domain_tag(domain)}_test_crop.npz")) as f:
+                logits1 = f["logits2"]
         p0 = CLIPModel.get_probs(torch.from_numpy(logits0))
         p1 = CLIPModel.get_probs(torch.from_numpy(logits1))
         signals = CLIPModel.get_signals(p0, p1)
@@ -77,12 +81,13 @@ class Analysis:
 
         return np.quantile(values, 0.025), np.quantile(values, 0.975)
 
-    def signal_table(self) -> pd.DataFrame:
+    def signal_table(self, view: str = "flip") -> pd.DataFrame:
         """RQ1 table: how much the two views differ in each domain, and how well each score separates
-        correct from wrong zero-shot predictions (AUROC, 0.5 is chance level)"""
+        correct from wrong zero-shot predictions (AUROC, 0.5 is chance level). view is flip or crop"""
+        signals = self.signals if view == "flip" else {d: self.load_signals(d, view) for d in self.domains}
         rows = []
         for domain in self.domains:
-            s = self.signals[domain]
+            s = signals[domain]
             row = {
                 "domain": domain,
                 "zero_shot_acc": 100 * s["correct"].mean(),
@@ -100,7 +105,40 @@ class Analysis:
         df = pd.DataFrame(rows)
         df.loc[len(df)] = ["Mean"] + df.iloc[:, 1:].mean().tolist()
 
-        path = Path(self.table_dir, f"signals_{self.model_name}.csv")
+        # the flip table keeps its old name, so summary.py still finds it
+        name = f"signals_{self.model_name}.csv" if view == "flip" else f"signals_{self.model_name}_{view}.csv"
+        path = Path(self.table_dir, name)
+        df.round(4).to_csv(path, index=False)
+        print(f"Table saved at {path}")
+
+        return df
+
+    def compare_views(self, n: int = 500) -> pd.DataFrame:
+        """it compares the within-decile AUROC of JS from the crop view with the one from the flip, on the
+        same resampled images, so the interval is for the difference crop minus flip"""
+        rng = np.random.default_rng(42)
+        rows = []
+        for domain in self.domains:
+            flip, crop = self.signals[domain], self.load_signals(domain, view="crop")
+            diffs = []
+            for _ in tqdm(range(n), f"Bootstrap {domain}", leave=False):
+                idx = rng.integers(0, len(flip["js"]), size=len(flip["js"]))
+                diffs.append(Analysis.within_bin_auroc({key: v[idx] for key, v in crop.items()})
+                             - Analysis.within_bin_auroc({key: v[idx] for key, v in flip.items()}))
+            rows.append({
+                "domain": domain,
+                "agree_flip": 100 * flip["agree"].mean(),
+                "agree_crop": 100 * crop["agree"].mean(),
+                "auroc_js_flip": roc_auc_score(flip["correct"], -flip["js"]),
+                "auroc_js_crop": roc_auc_score(crop["correct"], -crop["js"]),
+                "within_flip": Analysis.within_bin_auroc(flip),
+                "within_crop": Analysis.within_bin_auroc(crop),
+                "diff_low": np.quantile(diffs, 0.025),
+                "diff_high": np.quantile(diffs, 0.975)
+            })
+        df = pd.DataFrame(rows)
+
+        path = Path(self.table_dir, f"views_{self.model_name}.csv")
         df.round(4).to_csv(path, index=False)
         print(f"Table saved at {path}")
 
@@ -362,22 +400,34 @@ class Analysis:
 
         return df
 
-def main(model_name: str, k: int, dataset: str, frac: float) -> None:
-    ana = Analysis(model_name=model_name, k=k, dataset=dataset, frac=frac)
-    # print(ana.signal_table().round(3).to_string(index=False))
-    # ana.plot_js_hist()
-    # ana.plot_within_bin()
-    # acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
-    # print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
-    # print(ana.cache_table(rate=0.5, gamma=16).round(2).to_string(index=False))
-    # ana.plot_acc_vs_rate()
-    # ana.plot_gamma(rate=0.5)
+# def main(model_name: str, k: int, dataset: str, frac: float) -> None:
+#     ana = Analysis(model_name=model_name, k=k, dataset=dataset, frac=frac)
+#     # print(ana.signal_table().round(3).to_string(index=False))
+#     # ana.plot_js_hist()
+#     # ana.plot_within_bin()
+#     # acc_df, diff_df = ana.accuracy_tables(rate=0.5, gamma=16)
+#     # print(diff_df[["condition", "mean", "wins_vs_C0"]].round(2).to_string(index=False))
+#     # print(ana.cache_table(rate=0.5, gamma=16).round(2).to_string(index=False))
+#     # ana.plot_acc_vs_rate()
+#     # ana.plot_gamma(rate=0.5)
 
-    print(f"{model_name}, {dataset}, k={k}")
-    print(ana.ci_table(rate=0.5, gamma=16).round(2).to_string(index=False))
+#     print(f"{model_name}, {dataset}, k={k}")
+#     print(ana.ci_table(rate=0.5, gamma=16).round(2).to_string(index=False))
+
+# if __name__ == "__main__":
+#     for model_name in model_names:
+#         for dataset in ["officehome", "imageneta", "imagenetr"]:
+#             for k in k_values:
+#                 main(model_name, k, dataset, 1.0)
+
+def main(model_name: str, dataset: str) -> None:
+    # k only sets the output folder, the signals do not depend on it
+    ana = Analysis(model_name=model_name, k=3, dataset=dataset)
+    print(ana.signal_table(view="crop")[["domain", "views_agree", "mean_js", "auroc_js", "auroc_js_within_entropy_bins", "auroc_js_within_low", "auroc_js_within_high"]])
+    print(ana.compare_views())
+
 
 if __name__ == "__main__":
     for model_name in model_names:
-        for dataset in ["officehome", "imageneta", "imagenetr"]:
-            for k in k_values:
-                main(model_name, k, dataset, 1.0)
+        for dataset in domains:
+            main(model_name=model_name, dataset=dataset)

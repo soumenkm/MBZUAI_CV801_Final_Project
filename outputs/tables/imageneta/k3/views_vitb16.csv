@@ -1,0 +1,2 @@
+domain,agree_flip,agree_crop,auroc_js_flip,auroc_js_crop,within_flip,within_crop,diff_low,diff_high
+ImageNet-A,78.0403,66.9442,0.6476,0.6624,0.5252,0.5578,0.012,0.0557
