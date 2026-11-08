@@ -190,7 +190,7 @@ class Analysis:
     def settings(name: str, rate: float, gamma: float) -> tuple:
         """conditions without an admission rate or gamma are saved with rate None and gamma 0.0,
         so this returns the rate and gamma that were actually used for a condition"""
-        rate_rules = ["js", "mean_entropy", "entropy_of_mean", "random", "adaptive"]
+        rate_rules = ["entropy", "js", "mean_entropy", "entropy_of_mean", "random", "adaptive"]
         rate = rate if conditions[name]["rule"] in rate_rules else None
         gamma = gamma if conditions[name]["use_gamma"] else 0.0
 
@@ -382,13 +382,12 @@ class Analysis:
     def ci_table(self, rate: float = 0.5, gamma: float = 16) -> pd.DataFrame:
         """it compares each condition with the right reference: selective rules with the cache that admits all
         images under the same readout, and readout or eviction changes with the ordinary cache"""
-        rules = ["P1", "B2", "B3", "B4", "B6"]
+        rules = ["P1", "B1", "B2", "B3", "B4", "B6"]
         comparisons = ([(r, "C0") for r in rules + ["R1"]] + [(r + "n", "C0n") for r in rules] +
                        [(r + "x", "C0x") for r in rules + ["R1"]] +
-                       [(r, "C0") for r in ["C0n", "C0x", "T0", "E1", "E2", "P2", "P2m", "P2s", "P2h"]] +
-                       [("P2", "P2s"), ("P2", "P2h")] + 
-                        [(r, "C0") for r in ["C0n", "C0x", "T0", "E1", "E1c", "E2", "P2", "P2m", "P2s", "P2h"]] +
-                       [("P2", "P2s"), ("P2", "P2h"), ("E1c", "E1")])
+                       [(r, "C0") for r in ["C0n", "C0x", "T0", "E1", "E1c", "E2", "P2", "P2m", "P2s", "P2h"]] +
+                       [("P2", "P2s"), ("P2", "P2h"), ("E1c", "E1"),
+                        ("P1", "B1"), ("P1x", "B1x"), ("B2", "B1"), ("B2x", "B1x")])
         rows = []
         for name, ref in comparisons:
             diff, low, high = self.paired_ci(name, ref, rate, gamma)
@@ -413,6 +412,23 @@ class Analysis:
         df = pd.DataFrame(rows)
 
         path = Path(self.table_dir, f"crop_eviction_{self.model_name}.csv")
+        df.round(3).to_csv(path, index=False)
+        print(f"Table saved at {path}")
+
+        return df
+
+    def entropy_baseline_table(self) -> pd.DataFrame:
+        """it compares single-view entropy admission (B1) with admitting everything under each readout,
+        and JS admission and two-view entropy admission with B1, at 50% admission"""
+        comparisons = [("B1", "C0"), ("B1n", "C0n"), ("B1x", "C0x"), ("P1", "B1"), ("P1x", "B1x"), ("B2", "B1"), ("B2x", "B1x")]
+        rows = []
+        for name, ref in comparisons:
+            diff, low, high = self.paired_ci(name, ref)
+            rows.append({"model": self.model_name, "k": self.k, "condition": name, "reference": ref,
+                         "diff": diff, "low": low, "high": high, "excludes_0": bool(low > 0 or high < 0)})
+        df = pd.DataFrame(rows)
+
+        path = Path(self.table_dir, f"entropy_baseline_{self.model_name}.csv")
         df.round(3).to_csv(path, index=False)
         print(f"Table saved at {path}")
 
@@ -450,14 +466,26 @@ class Analysis:
 #         for dataset in domains:
 #             main(model_name=model_name, dataset=dataset)
 
+# def main(model_name: str, k: int, dataset: str) -> None:
+#     ana = Analysis(model_name=model_name, k=k, dataset=dataset)
+#     print(f"{dataset}")
+#     print(ana.crop_eviction_table())
+
+
+# if __name__ == "__main__":
+#     for model_name in model_names:
+#         for k in k_values:
+#             for dataset in ["imagenetr", "imageneta", "officehome"]:
+#                 main(model_name, k, dataset)
+
 def main(model_name: str, k: int, dataset: str) -> None:
     ana = Analysis(model_name=model_name, k=k, dataset=dataset)
     print(f"{dataset}")
-    print(ana.crop_eviction_table())
+    print(ana.entropy_baseline_table())
 
 
 if __name__ == "__main__":
     for model_name in model_names:
         for k in k_values:
-            for dataset in ["imagenetr", "imageneta", "officehome"]:
+            for dataset in ["officehome", "imageneta", "imagenetr"]:
                 main(model_name, k, dataset)

@@ -172,7 +172,7 @@ class CLIPModel:
         state holds what the rule needs, like the threshold, the admit rate or the class-wise means"""
         if rule == "always":
             return True
-        if rule in ["js", "mean_entropy", "entropy_of_mean"]:
+        if rule in ["entropy", "js", "mean_entropy", "entropy_of_mean"]:
             return signals[rule][i] <= state["threshold"]
         if rule == "random":
             return state["rng"].random() < state["rate"]
@@ -282,11 +282,16 @@ def main(model_name: str, domain: str, n_images: int) -> None:
     # print(f"max: {CLIPModel.read_cache(cache, query, beta=5.0, readout='max')} (expected [1. 0.368])")
 
     # low entropy, rescued, views disagree, JS too high, entropy too high
-    state = {"low": 1.0, "high": 2.0, "js": 0.01}
-    signals = {"entropy": np.array([0.5, 1.5, 1.5, 1.5, 2.5]), "agree": np.array([True, True, False, True, True]),
-               "js": np.array([0.05, 0.005, 0.005, 0.05, 0.0])}
-    allowed = [CLIPModel.is_allowed("rescue", signals, i, state) for i in range(5)]
-    print(f"rescue: {allowed} (expected [True, True, False, False, False])")
+    # state = {"low": 1.0, "high": 2.0, "js": 0.01}
+    # signals = {"entropy": np.array([0.5, 1.5, 1.5, 1.5, 2.5]), "agree": np.array([True, True, False, True, True]),
+    #            "js": np.array([0.05, 0.005, 0.005, 0.05, 0.0])}
+    # allowed = [CLIPModel.is_allowed("rescue", signals, i, state) for i in range(5)]
+    # print(f"rescue: {allowed} (expected [True, True, False, False, False])")
+
+    signals = {"entropy": np.array([0.1, 0.5, 0.9])}
+    state = {"threshold": 0.5}
+    allowed = [CLIPModel.is_allowed("entropy", signals, i, state) for i in range(3)]
+    print(f"entropy rule: {allowed} (expected [True, True, False])")
 
 if __name__ == "__main__":
     main("vitb16", "Art", 64)

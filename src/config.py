@@ -30,6 +30,12 @@ conditions = {
     "P1": {"rule": "js", "readout": "sum", "use_gamma": False},
     "P2": {"rule": "always", "readout": "sum", "use_gamma": True},
     "P3": {"rule": "js", "readout": "sum", "use_gamma": True},
+    
+    # single-view entropy admission: the plain confidence baseline, no second view
+    "B1": {"rule": "entropy", "readout": "sum", "use_gamma": False},
+    "B1n": {"rule": "entropy", "readout": "norm", "use_gamma": False},
+    "B1x": {"rule": "entropy", "readout": "max", "use_gamma": False},
+    
     "B2": {"rule": "mean_entropy", "readout": "sum", "use_gamma": False},
     "B3": {"rule": "entropy_of_mean", "readout": "sum", "use_gamma": False},
     "B4": {"rule": "random", "readout": "sum", "use_gamma": False},
@@ -72,6 +78,8 @@ conditions = {
 
     # E1 with the crop view instead of the flip, only the eviction key changes
     "E1c": {"rule": "always", "readout": "sum", "use_gamma": False, "evict": "entropy_of_mean", "view": "crop"},
+
+    
 }
 
 # third view: a random resized crop, the same crop for an image in every run

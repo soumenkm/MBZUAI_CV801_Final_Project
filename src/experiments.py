@@ -212,7 +212,7 @@ class Experiments:
         """it sets up what an admission rule needs before a run. thresholds come from the dev split,
         so that the rule admits about the target share of images. nothing from the test split is used"""
         dev = self.signals["dev"]
-        if rule in ["js", "mean_entropy", "entropy_of_mean"]:
+        if rule in ["entropy", "js", "mean_entropy", "entropy_of_mean"]:
             return {"threshold": np.quantile(dev[rule], rate)}
         if rule == "random":
             return {"rng": np.random.default_rng(seed), "rate": rate}
@@ -294,7 +294,7 @@ class Experiments:
 
     def run_all(self) -> list:
         """it runs every condition at every admission rate, gamma and stream order"""
-        rate_rules = ["js", "mean_entropy", "entropy_of_mean", "random", "adaptive"]
+        rate_rules = ["entropy", "js", "mean_entropy", "entropy_of_mean", "random", "adaptive"]
         runs = []
         for name, cond in conditions.items():
             rates = target_rates if cond["rule"] in rate_rules else [None]
@@ -343,6 +343,10 @@ class Experiments:
             same_t0 = load("T0", None, 0.0, order_seed)["snapshots"] == load("C0", None, 0.0, order_seed)["snapshots"]
             same_r1 = load("R1x", None, 0.0, order_seed)["snapshots"] == load("R1", None, 0.0, order_seed)["snapshots"]
             print(f"order {order_seed}: T0 stores the same as C0: {same_t0}, R1x stores the same as R1: {same_r1}")
+
+            same_b1 = all(load("B1n", r, 0.0, order_seed)["snapshots"] == load("B1", r, 0.0, order_seed)["snapshots"] ==
+                          load("B1x", r, 0.0, order_seed)["snapshots"] for r in target_rates)
+            print(f"order {order_seed}: B1, B1n and B1x store the same: {same_b1}")
 
 # def main(model_name: str, dataset: str, domain: str, k: int, frac: float) -> None:
 #     # exp = Experiments(model_name=model_name, domain=domain, frac=frac)
@@ -441,27 +445,58 @@ class Experiments:
 #         for dataset in domains:
 #             main(model_name=model_name, dataset=dataset)
 
+# def main(model_name: str, dataset: str, domain: str, k: int) -> None:
+#     exp = Experiments(model_name=model_name, domain=domain, k=k, dataset=dataset)
+#     summaries = [exp.run_condition("E1c", None, 0.0, o) for o in order_seeds]
+#     # C0 and E1 are already saved, so these are only loaded
+#     c0 = [exp.run_condition("C0", None, 0.0, o) for o in order_seeds]
+#     e1 = [exp.run_condition("E1", None, 0.0, o) for o in order_seeds]
+
+#     # the crop changes only the eviction key, so the prediction and entropy of every image must be the same
+#     crop, flip = exp.get_crop_signals(), exp.signals["test"]
+#     same_base = np.array_equal(crop["pred"], flip["pred"]) and np.allclose(crop["entropy"], flip["entropy"])
+#     changed = 100 * np.mean(~np.isclose(crop["entropy_of_mean"], flip["entropy_of_mean"]))
+#     print(f"{model_name} {domain} k={k}: same prediction and entropy: {same_base}, eviction key changed for {changed:.1f}% of images")
+
+#     def mean_acc(s):
+#         return np.mean([r["accuracy"] for r in s])
+#     print(f"{model_name} {domain} k={k}: C0 {mean_acc(c0):.2f}, E1 {mean_acc(e1):.2f}, E1c {mean_acc(summaries):.2f}")
+
+
+# if __name__ == "__main__":
+#     for model_name in model_names:
+#         for dataset in ["imagenetr", "imageneta", "officehome"]:
+#             for k in k_values:
+#                 for domain in domains[dataset]:
+#                     main(model_name, dataset, domain, k)
+
 def main(model_name: str, dataset: str, domain: str, k: int) -> None:
     exp = Experiments(model_name=model_name, domain=domain, k=k, dataset=dataset)
-    summaries = [exp.run_condition("E1c", None, 0.0, o) for o in order_seeds]
-    # C0 and E1 are already saved, so these are only loaded
-    c0 = [exp.run_condition("C0", None, 0.0, o) for o in order_seeds]
-    e1 = [exp.run_condition("E1", None, 0.0, o) for o in order_seeds]
+    runs = [(n, r, o) for n in ["B1", "B1n", "B1x"] for r in target_rates for o in order_seeds]
+    summaries = [exp.run_condition(n, r, 0.0, o) for n, r, o in tqdm(runs, f"B1 {domain} k={k}", unit="runs")]
 
-    # the crop changes only the eviction key, so the prediction and entropy of every image must be the same
-    crop, flip = exp.get_crop_signals(), exp.signals["test"]
-    same_base = np.array_equal(crop["pred"], flip["pred"]) and np.allclose(crop["entropy"], flip["entropy"])
-    changed = 100 * np.mean(~np.isclose(crop["entropy_of_mean"], flip["entropy_of_mean"]))
-    print(f"{model_name} {domain} k={k}: same prediction and entropy: {same_base}, eviction key changed for {changed:.1f}% of images")
+    # how similar B1 and B2 are: the share of test images that both admit at 50%
+    dev, test = exp.signals["dev"], exp.signals["test"]
+    b1 = test["entropy"] <= np.quantile(dev["entropy"], 0.5)
+    b2 = test["mean_entropy"] <= np.quantile(dev["mean_entropy"], 0.5)
+    both, either = 100 * (b1 & b2).mean(), 100 * (b1 | b2).mean()
+    print(f"{model_name} {domain} k={k}: B1 admits {100 * b1.mean():.1f}%, B2 {100 * b2.mean():.1f}%, "
+          f"both {both:.1f}%, same decision for {100 * (b1 == b2).mean():.1f}% of images, overlap/union {100 * both / either:.1f}%")
 
-    def mean_acc(s):
-        return np.mean([r["accuracy"] for r in s])
-    print(f"{model_name} {domain} k={k}: C0 {mean_acc(c0):.2f}, E1 {mean_acc(e1):.2f}, E1c {mean_acc(summaries):.2f}")
+    def mean_acc(name):
+        # B1 runs come from the summaries, the other conditions are already saved and only loaded
+        if name.startswith("B1"):
+            return np.mean([s["accuracy"] for s in summaries if s["name"] == name and s["rate"] == 0.5])
+        rate = None if name.startswith("C0") else 0.5
+        return np.mean([exp.run_condition(name, rate, 0.0, o)["accuracy"] for o in order_seeds])
+
+    names = ["C0", "B1", "B2", "P1", "C0x", "B1x", "B2x", "P1x"]
+    print(f"{model_name} {domain} k={k}: " + ", ".join(f"{n} {mean_acc(n):.2f}" for n in names))
 
 
 if __name__ == "__main__":
     for model_name in model_names:
-        for dataset in ["imagenetr", "imageneta", "officehome"]:
+        for dataset in ["officehome", "imageneta", "imagenetr"]:
             for k in k_values:
                 for domain in domains[dataset]:
                     main(model_name, dataset, domain, k)

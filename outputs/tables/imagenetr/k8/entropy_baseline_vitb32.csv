@@ -1,0 +1,8 @@
+model,k,condition,reference,diff,low,high,excludes_0
+vitb32,8,B1,C0,-0.315,-0.399,-0.239,True
+vitb32,8,B1n,C0n,-0.321,-0.384,-0.26,True
+vitb32,8,B1x,C0x,-0.008,-0.033,0.02,False
+vitb32,8,P1,B1,0.125,0.024,0.232,True
+vitb32,8,P1x,B1x,-0.017,-0.059,0.022,False
+vitb32,8,B2,B1,0.099,0.05,0.144,True
+vitb32,8,B2x,B1x,0.002,-0.014,0.021,False
