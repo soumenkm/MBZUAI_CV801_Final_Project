@@ -379,6 +379,60 @@ class Analysis:
 
         return float(np.mean([d.mean() for d in diffs])), float(np.quantile(means, 0.025)), float(np.quantile(means, 0.975))
 
+    @staticmethod
+    def covered_at_prediction(run: dict) -> np.ndarray:
+        """it returns, for each test image ordered by image index, whether its true class already had an entry
+        in the cache when the image was predicted. an entry is only replaced by one of the same class, so a class
+        that has an entry keeps one until the end. this holds for runs that predict before storing"""
+        covered = np.zeros(len(run["rows"]), dtype=bool)
+        classes = set()
+        for r in sorted(run["rows"], key=lambda r: r["t"]):
+            covered[r["idx"]] = r["label"] in classes
+            if r["action"] in ["added", "replaced"]:
+                classes.add(r["pred_base"])
+
+        return covered
+
+    def coverage_split(self, name: str, ref: str, rate: float = 0.5, gamma: float = 16, n: int = 1000) -> pd.DataFrame:
+        """it splits the paired difference between a condition and its reference into four groups of images:
+        true class covered in both caches, only in the condition's cache, only in the reference's cache, or in
+        neither, at the time each image was predicted. the four parts add up to the paired difference"""
+        groups = ["both", "cond_only", "ref_only", "neither"]
+        values, shares = {g: [] for g in groups}, {g: [] for g in groups}
+        for domain in self.domains:
+            n_images = len(self.signals[domain]["pred"])
+            contrib = {g: np.zeros(n_images) for g in groups}
+            share = {g: 0.0 for g in groups}
+            for o in order_seeds:
+                run_a, run_b = self.load_run(domain, name, rate, gamma, o), self.load_run(domain, ref, rate, gamma, o)
+                cov_a, cov_b = Analysis.covered_at_prediction(run_a), Analysis.covered_at_prediction(run_b)
+                diff = Analysis.correct_vector(run_a) - Analysis.correct_vector(run_b)
+                masks = {"both": cov_a & cov_b, "cond_only": cov_a & ~cov_b, "ref_only": ~cov_a & cov_b, "neither": ~cov_a & ~cov_b}
+                for g in groups:
+                    contrib[g] += 100 * diff * masks[g] / len(order_seeds)
+                    share[g] += 100 * masks[g].mean() / len(order_seeds)
+            for g in groups:
+                values[g].append(contrib[g])
+                shares[g].append(share[g])
+
+        # each part gets its own paired bootstrap over images, with domains weighted equally
+        rng = np.random.default_rng(42)
+        rows = []
+        for g in groups:
+            means = np.zeros(n)
+            for v in values[g]:
+                means += np.array([v[rng.integers(0, len(v), len(v))].mean() for _ in range(n)]) / len(values[g])
+            rows.append({"model": self.model_name, "k": self.k, "condition": name, "reference": ref, "group": g,
+                         "image_share": np.mean(shares[g]), "part": np.mean([v.mean() for v in values[g]]),
+                         "low": np.quantile(means, 0.025), "high": np.quantile(means, 0.975)})
+        df = pd.DataFrame(rows)
+
+        path = Path(self.table_dir, f"coverage_{name}_{ref}_{self.model_name}.csv")
+        df.round(3).to_csv(path, index=False)
+        print(f"Table saved at {path}")
+
+        return df
+
     def ci_table(self, rate: float = 0.5, gamma: float = 16) -> pd.DataFrame:
         """it compares each condition with the right reference: selective rules with the cache that admits all
         images under the same readout, and readout or eviction changes with the ordinary cache"""
@@ -478,10 +532,26 @@ class Analysis:
 #             for dataset in ["imagenetr", "imageneta", "officehome"]:
 #                 main(model_name, k, dataset)
 
+# def main(model_name: str, k: int, dataset: str) -> None:
+#     ana = Analysis(model_name=model_name, k=k, dataset=dataset)
+#     print(f"{dataset}")
+#     print(ana.entropy_baseline_table())
+
+
+# if __name__ == "__main__":
+#     for model_name in model_names:
+#         for k in k_values:
+#             for dataset in ["officehome", "imageneta", "imagenetr"]:
+#                 main(model_name, k, dataset)
+
 def main(model_name: str, k: int, dataset: str) -> None:
     ana = Analysis(model_name=model_name, k=k, dataset=dataset)
-    print(f"{dataset}")
-    print(ana.entropy_baseline_table())
+    for name, ref in [("P1x", "B1x"), ("P1", "B1")]:
+        df = ana.coverage_split(name, ref)
+        diff, _, _ = ana.paired_ci(name, ref)
+        # the four parts must add up to the paired difference, otherwise the split is wrong
+        print(f"{model_name} {dataset} k={k}: {name} - {ref} = {diff:.3f}, sum of parts = {df['part'].sum():.3f}")
+        print(df[["group", "image_share", "part", "low", "high"]].round(3).to_string(index=False))
 
 
 if __name__ == "__main__":

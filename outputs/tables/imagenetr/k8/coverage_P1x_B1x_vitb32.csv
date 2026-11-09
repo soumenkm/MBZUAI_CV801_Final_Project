@@ -1,0 +1,5 @@
+model,k,condition,reference,group,image_share,part,low,high
+vitb32,8,P1x,B1x,both,97.27,-0.036,-0.077,0.003
+vitb32,8,P1x,B1x,cond_only,0.597,0.036,0.027,0.045
+vitb32,8,P1x,B1x,ref_only,0.362,-0.014,-0.02,-0.009
+vitb32,8,P1x,B1x,neither,1.771,-0.002,-0.008,0.002
