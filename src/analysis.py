@@ -528,6 +528,123 @@ class Analysis:
 
         return df
 
+    @staticmethod
+    def summary_settings() -> list:
+        """it lists the 12 settings in the order used by the summary figures, K = 3 first"""
+        return [(k, model_name, dataset) for k in [3, 8]
+                for model_name in ["vitb16", "vitb32"]
+                for dataset in ["officehome", "imageneta", "imagenetr"]]
+
+    @staticmethod
+    def setting_label(model_name: str, dataset: str) -> str:
+        """it returns a short name of a setting for the x axis"""
+        dataset_names = {"officehome": "OH", "imageneta": "IN-A", "imagenetr": "IN-R"}
+        model_names = {"vitb16": "B/16", "vitb32": "B/32"}
+
+        return f"{dataset_names[dataset]} {model_names[model_name]}"
+
+    def setting_table(self, dataset: str, k: int, file_name: str) -> pd.DataFrame:
+        """it loads a saved table of one dataset and one cache size"""
+        return pd.read_csv(Path(self.output_dir, "tables", dataset, f"k{k}", file_name))
+
+    @staticmethod
+    def find_diff(table: pd.DataFrame, name: str, ref: str) -> tuple:
+        """it returns the difference and its interval for one pair of conditions"""
+        row = table[(table["condition"] == name) & (table["reference"] == ref)]
+        if len(row) == 0:
+            raise ValueError(f"{name} - {ref} is not in the table")
+        row = row.iloc[0]
+
+        return row["diff"], row["low"], row["high"]
+
+    def plot_readout_summary(self, rate: float = 0.5, gamma: float = 16) -> None:
+        """it plots JS admission (P1) and entropy admission (B1) minus the cache that
+        stores all images, under the sum, norm and max readouts, for all 12 settings"""
+        settings = self.summary_settings()
+        readouts = [("", "C0", "sum (TDA)"), ("n", "C0n", "norm"), ("x", "C0x", "max")]
+        colors = ["tab:blue", "tab:orange", "tab:green"]
+        shifts = [-0.22, 0.0, 0.22]
+        x = np.arange(len(settings))
+
+        fig, axes = plt.subplots(2, 1, figsize=(7.0, 3.6), sharex=True)
+        for ax, rule in zip(axes, ["P1", "B1"]):
+            for (suffix, ref, label), color, shift in zip(readouts, colors, shifts):
+                diffs = []
+                for k, model_name, dataset in settings:
+                    if rule == "P1":
+                        file_name = f"ci_{model_name}_rate{rate}_gamma{gamma}.csv"
+                    else:
+                        file_name = f"entropy_baseline_{model_name}.csv"
+                    table = self.setting_table(dataset, k, file_name)
+                    diffs.append(self.find_diff(table, rule + suffix, ref))
+                diffs = np.array(diffs)
+                errors = [diffs[:, 0] - diffs[:, 1], diffs[:, 2] - diffs[:, 0]]
+                ax.errorbar(x + shift, diffs[:, 0], yerr=errors, fmt="o", ms=3, capsize=1.5,
+                            elinewidth=0.8, color=color, label=label)
+                print(rule + suffix, "-", ref, np.round(diffs[:, 0], 2))
+            ax.axhline(0, ls=":", color="black", lw=0.7)
+            ax.axvline(5.5, color="black", lw=0.6)
+            ax.grid(axis="y", alpha=0.25)
+            name = "JS admission (P1)" if rule == "P1" else "entropy admission (B1)"
+            ax.set_ylabel(f"{name}\nminus admit all (pts)", fontsize=7)
+
+        axes[0].text(2.5, 1.02, "K = 3", transform=axes[0].get_xaxis_transform(), ha="center", fontweight="bold")
+        axes[0].text(8.5, 1.02, "K = 8", transform=axes[0].get_xaxis_transform(), ha="center", fontweight="bold")
+        axes[0].legend(fontsize=7, loc="lower left", ncol=3, frameon=False)
+        axes[1].set_xticks(x)
+        axes[1].set_xticklabels([self.setting_label(m, d) for _, m, d in settings], fontsize=7)
+        plt.tight_layout(h_pad=0.4)
+
+        path = Path(self.output_dir, "figures", "summary", f"readout_P1_B1_rate{rate}.png")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path, dpi=300)
+        plt.close()
+        print(f"saved {path}")
+
+    def plot_coverage_summary(self, name: str = "P1x", ref: str = "B1x") -> None:
+        """it plots the parts of name - ref that come from each coverage group, for all
+        12 settings. The diamond is the sum of the parts, which is the whole difference"""
+        settings = self.summary_settings()
+        group_names = {"both": "both covered", "cond_only": f"only {name} covers",
+                       "ref_only": f"only {ref} covers", "neither": "neither"}
+        colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
+        shifts = [-0.3, -0.1, 0.1, 0.3]
+        x = np.arange(len(settings))
+
+        tables = [self.setting_table(d, k, f"coverage_{name}_{ref}_{m}.csv") for k, m, d in settings]
+        groups = list(tables[0]["group"])
+
+        fig, ax = plt.subplots(figsize=(7.0, 2.8))
+        for group, color, shift in zip(groups, colors, shifts):
+            rows = [table[table["group"] == group].iloc[0] for table in tables]
+            parts = np.array([row["part"] for row in rows])
+            errors = [parts - np.array([row["low"] for row in rows]),
+                      np.array([row["high"] for row in rows]) - parts]
+            ax.bar(x + shift, parts, width=0.2, color=color, yerr=errors, capsize=1.5,
+                   error_kw={"elinewidth": 0.8}, label=group_names.get(group, group))
+            print(group, np.round(parts, 2))
+
+        totals = [table["part"].sum() for table in tables]
+        ax.scatter(x, totals, marker="D", s=18, color="black", zorder=3, label=f"total {name} - {ref}")
+        print("total", np.round(totals, 2))
+
+        ax.axhline(0, color="black", lw=0.7)
+        ax.axvline(5.5, color="black", lw=0.6)
+        ax.grid(axis="y", alpha=0.25)
+        ax.text(2.5, 1.02, "K = 3", transform=ax.get_xaxis_transform(), ha="center", fontweight="bold")
+        ax.text(8.5, 1.02, "K = 8", transform=ax.get_xaxis_transform(), ha="center", fontweight="bold")
+        ax.set_ylabel(f"part of {name} - {ref} (pts)", fontsize=7)
+        ax.set_xticks(x)
+        ax.set_xticklabels([self.setting_label(m, d) for _, m, d in settings], fontsize=7)
+        ax.legend(fontsize=6, loc="lower left", ncol=5, frameon=False)
+        plt.tight_layout()
+
+        path = Path(self.output_dir, "figures", "summary", f"covsplit_{name}_{ref}.png")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path, dpi=300)
+        plt.close()
+        print(f"saved {path}")
+
 # def main(model_name: str, k: int, dataset: str, frac: float) -> None:
 #     ana = Analysis(model_name=model_name, k=k, dataset=dataset, frac=frac)
 #     # print(ana.signal_table().round(3).to_string(index=False))
@@ -600,15 +717,24 @@ class Analysis:
 #             for dataset in ["officehome", "imageneta", "imagenetr"]:
 #                 main(model_name, k, dataset)
 
-def main(model_name: str, k: int, dataset: str) -> None:
-    ana = Analysis(model_name=model_name, k=k, dataset=dataset)
-    df = ana.two_view_table()
-    print(f"{model_name} {dataset} k={k}")
-    print(df.round(2).to_string(index=False))
+# def main(model_name: str, k: int, dataset: str) -> None:
+#     ana = Analysis(model_name=model_name, k=k, dataset=dataset)
+#     df = ana.two_view_table()
+#     print(f"{model_name} {dataset} k={k}")
+#     print(df.round(2).to_string(index=False))
+
+
+# if __name__ == "__main__":
+#     for model_name in model_names:
+#         for k in k_values:
+#             for dataset in ["officehome", "imageneta", "imagenetr"]:
+#                 main(model_name, k, dataset)
+
+def main() -> None:
+    analysis = Analysis("vitb16", 3, "officehome")
+    analysis.plot_readout_summary()
+    analysis.plot_coverage_summary()
 
 
 if __name__ == "__main__":
-    for model_name in model_names:
-        for k in k_values:
-            for dataset in ["officehome", "imageneta", "imagenetr"]:
-                main(model_name, k, dataset)
+    main()
