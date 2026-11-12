@@ -8,6 +8,7 @@ from models import CLIPModel
 from config import domains, model_names, conditions, target_rates, gamma_grid, order_seeds, k_values
 import json
 from tqdm import tqdm
+from data import OfficeHomeDataset
 
 class Analysis:
     def __init__(self, model_name: str, k: int, dataset: str = "officehome", frac: float = 1.0) -> None:
@@ -645,6 +646,56 @@ class Analysis:
         plt.close()
         print(f"saved {path}")
 
+    def plot_samples(self, class_names: tuple = ("Bike", "Mug"), seed: int = 0) -> None:
+        """it shows sample test images, one row per dataset. Office-Home shows two classes in each of its
+        four domains, ImageNet-R and ImageNet-A show eight images of eight different classes"""
+        rows = [("Office-Home", "officehome"), ("ImageNet-R", "imagenetr"), ("ImageNet-A", "imageneta")]
+        n_cols = 8
+        rng = np.random.default_rng(seed)
+
+        def clean(name):
+            return name.replace("_", " ").lower()
+
+        fig, axs = plt.subplots(len(rows), n_cols, figsize=(7.0, 3.4))
+        for r, (row_name, dataset) in enumerate(rows):
+            picks = []
+            if dataset == "officehome":
+                for domain in domains[dataset]:
+                    ds = OfficeHomeDataset(domain=domain, split="test", dataset=dataset)
+                    names = [clean(n) for n in ds.class_names]
+                    labels = np.array([item["label"] for item in ds.data])
+                    for name in class_names:
+                        if clean(name) not in names:
+                            raise ValueError(f"{name} is not an Office-Home class: {ds.class_names}")
+                        i = int(rng.choice(np.where(labels == names.index(clean(name)))[0]))
+                        picks.append((ds[i]["image_path"], f"{domain} ({clean(name)})"))
+            else:
+                ds = OfficeHomeDataset(domain=domains[dataset][0], split="test", dataset=dataset)
+                labels = np.array([item["label"] for item in ds.data])
+                for c in rng.choice(np.unique(labels), size=n_cols, replace=False):
+                    i = int(rng.choice(np.where(labels == c)[0]))
+                    picks.append((ds[i]["image_path"], clean(ds.prompt_names()[c])))
+
+            for c, (path, title) in enumerate(picks):
+                # a square center crop, so every cell has the same size
+                image = OfficeHomeDataset._load_image(path)
+                w, h = image.size
+                s = min(w, h)
+                image = image.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2)).resize((256, 256))
+                ax = axs[r][c]
+                ax.imshow(image)
+                ax.set_title(title, fontsize=6, pad=2)
+                ax.set_xticks([])
+                ax.set_yticks([])
+            axs[r][0].set_ylabel(row_name, fontsize=7, fontweight="bold")
+        plt.tight_layout(h_pad=1.0, w_pad=0.2)
+
+        path = Path(self.output_dir, "figures", "summary", "samples.png")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path, dpi=300)
+        plt.close()
+        print(f"Figure saved at {path}")
+
 # def main(model_name: str, k: int, dataset: str, frac: float) -> None:
 #     ana = Analysis(model_name=model_name, k=k, dataset=dataset, frac=frac)
 #     # print(ana.signal_table().round(3).to_string(index=False))
@@ -730,10 +781,18 @@ class Analysis:
 #             for dataset in ["officehome", "imageneta", "imagenetr"]:
 #                 main(model_name, k, dataset)
 
+# def main() -> None:
+#     analysis = Analysis("vitb16", 3, "officehome")
+#     analysis.plot_readout_summary()
+#     analysis.plot_coverage_summary()
+
+
+# if __name__ == "__main__":
+#     main()
+
 def main() -> None:
-    analysis = Analysis("vitb16", 3, "officehome")
-    analysis.plot_readout_summary()
-    analysis.plot_coverage_summary()
+    ana = Analysis("vitb16", 3, "officehome")
+    ana.plot_samples(class_names=("Bike", "Mug"), seed=0)
 
 
 if __name__ == "__main__":
