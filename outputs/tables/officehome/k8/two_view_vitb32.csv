@@ -1,0 +1,6 @@
+domain,zero_shot_orig,zero_shot_flip,zero_shot_avg,C0,avg - orig,avg - orig low,avg - orig high,avg - C0,avg - C0 low,avg - C0 high
+Art,78.235,76.744,78.295,78.402,,,,,,
+Clipart,64.679,63.097,64.613,63.502,,,,,,
+Product,86.257,86.062,86.55,87.024,,,,,,
+Real World,87.525,86.896,87.79,87.333,,,,,,
+Mean,79.174,78.2,79.312,79.065,0.138,-0.166,0.462,0.246,-0.113,0.593

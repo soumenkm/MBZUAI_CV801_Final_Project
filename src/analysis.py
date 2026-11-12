@@ -433,6 +433,46 @@ class Analysis:
 
         return df
 
+    def two_view_table(self, n: int = 1000) -> pd.DataFrame:
+        """it compares zero-shot CLIP on the original view with the flip alone and with the average of both views'
+        probabilities, and the average with the ordinary cache (C0). the intervals are paired over images, with
+        domains weighted equally, like the other tables"""
+        rows, diffs = [], {"avg - orig": [], "avg - C0": []}
+        for domain in self.domains:
+            with np.load(Path(self.feature_dir, f"{self.domain_tag(domain)}_test.npz")) as f:
+                logits0, logits1, labels = f["logits0"], f["logits1"], f["labels"]
+            p0 = CLIPModel.get_probs(torch.from_numpy(logits0))
+            p1 = CLIPModel.get_probs(torch.from_numpy(logits1))
+            orig = (p0.argmax(axis=-1) == labels).astype(float)
+            flip = (p1.argmax(axis=-1) == labels).astype(float)
+            avg = (((p0 + p1) / 2).argmax(axis=-1) == labels).astype(float)
+            # C0 is correct or not per image, averaged over the stream orders
+            c0 = np.mean([Analysis.correct_vector(self.load_run(domain, "C0", 0.5, 16, o)) for o in order_seeds], axis=0)
+
+            rows.append({"domain": domain, "zero_shot_orig": 100 * orig.mean(), "zero_shot_flip": 100 * flip.mean(),
+                         "zero_shot_avg": 100 * avg.mean(), "C0": 100 * c0.mean()})
+            diffs["avg - orig"].append(100 * (avg - orig))
+            diffs["avg - C0"].append(100 * (avg - c0))
+
+        rng = np.random.default_rng(42)
+        mean_row = {"domain": "Mean"}
+        for key in ["zero_shot_orig", "zero_shot_flip", "zero_shot_avg", "C0"]:
+            mean_row[key] = np.mean([r[key] for r in rows])
+        for name, values in diffs.items():
+            boot = np.zeros(n)
+            for v in values:
+                boot += np.array([v[rng.integers(0, len(v), len(v))].mean() for _ in range(n)]) / len(values)
+            mean_row[name] = np.mean([v.mean() for v in values])
+            mean_row[name + " low"] = np.quantile(boot, 0.025)
+            mean_row[name + " high"] = np.quantile(boot, 0.975)
+        df = pd.DataFrame(rows + [mean_row])
+
+        path = Path(self.table_dir, f"two_view_{self.model_name}.csv")
+        df.round(3).to_csv(path, index=False)
+        print(f"Table saved at {path}")
+
+        return df
+
     def ci_table(self, rate: float = 0.5, gamma: float = 16) -> pd.DataFrame:
         """it compares each condition with the right reference: selective rules with the cache that admits all
         images under the same readout, and readout or eviction changes with the ordinary cache"""
@@ -544,14 +584,27 @@ class Analysis:
 #             for dataset in ["officehome", "imageneta", "imagenetr"]:
 #                 main(model_name, k, dataset)
 
+# def main(model_name: str, k: int, dataset: str) -> None:
+#     ana = Analysis(model_name=model_name, k=k, dataset=dataset)
+#     for name, ref in [("P1x", "B1x"), ("P1", "B1")]:
+#         df = ana.coverage_split(name, ref)
+#         diff, _, _ = ana.paired_ci(name, ref)
+#         # the four parts must add up to the paired difference, otherwise the split is wrong
+#         print(f"{model_name} {dataset} k={k}: {name} - {ref} = {diff:.3f}, sum of parts = {df['part'].sum():.3f}")
+#         print(df[["group", "image_share", "part", "low", "high"]].round(3).to_string(index=False))
+
+
+# if __name__ == "__main__":
+#     for model_name in model_names:
+#         for k in k_values:
+#             for dataset in ["officehome", "imageneta", "imagenetr"]:
+#                 main(model_name, k, dataset)
+
 def main(model_name: str, k: int, dataset: str) -> None:
     ana = Analysis(model_name=model_name, k=k, dataset=dataset)
-    for name, ref in [("P1x", "B1x"), ("P1", "B1")]:
-        df = ana.coverage_split(name, ref)
-        diff, _, _ = ana.paired_ci(name, ref)
-        # the four parts must add up to the paired difference, otherwise the split is wrong
-        print(f"{model_name} {dataset} k={k}: {name} - {ref} = {diff:.3f}, sum of parts = {df['part'].sum():.3f}")
-        print(df[["group", "image_share", "part", "low", "high"]].round(3).to_string(index=False))
+    df = ana.two_view_table()
+    print(f"{model_name} {dataset} k={k}")
+    print(df.round(2).to_string(index=False))
 
 
 if __name__ == "__main__":

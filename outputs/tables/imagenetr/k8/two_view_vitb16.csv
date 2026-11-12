@@ -1,0 +1,3 @@
+domain,zero_shot_orig,zero_shot_flip,zero_shot_avg,C0,avg - orig,avg - orig low,avg - orig high,avg - C0,avg - C0 low,avg - C0 high
+ImageNet-R,73.766,72.671,74.512,73.887,,,,,,
+Mean,73.766,72.671,74.512,73.887,0.746,0.493,1.0,0.625,0.318,0.923

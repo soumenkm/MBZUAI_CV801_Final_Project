@@ -6,6 +6,7 @@ from data import OfficeHomeDataset
 from models import CLIPModel
 from config import domains, model_names, k_values, alpha, beta, target_rates, gamma_grid, order_seeds, adaptive_lam, evict_lam, rescue_low, rescue_high, rescue_js, conditions
 import json
+import time
 
 class Experiments:
     def __init__(self, model_name: str, domain: str, k: int, frac: float = 1.0, dataset: str = "officehome") -> None:
@@ -124,6 +125,36 @@ class Experiments:
             self.crop_signals = CLIPModel.get_signals(p0, p2)
 
         return self.crop_signals
+
+    def time_views(self, n_images: int = 256, repeats: int = 5) -> dict:
+        """it measures the time CLIP needs to encode test images with one view and with two views
+        (original and flip). images are loaded before timing, so only the flip and the encoding are timed"""
+        if self.model is None:
+            self.model = CLIPModel(model_name=self.model_name)
+        ds = self.datasets["test"]
+        images = [OfficeHomeDataset._load_image(ds[i]["image_path"]) for i in range(min(n_images, len(ds)))]
+        self.model.encode_images(images[:16])  # warm-up, so the first timed run is not slower
+
+        times = {"one view": [], "two views": []}
+        for _ in range(repeats):
+            torch.cuda.synchronize()
+            start = time.perf_counter()
+            self.model.encode_images(images)
+            torch.cuda.synchronize()
+            times["one view"].append(time.perf_counter() - start)
+
+            torch.cuda.synchronize()
+            start = time.perf_counter()
+            self.model.encode_images(images)
+            self.model.encode_images([OfficeHomeDataset._flip_image(img) for img in images])
+            torch.cuda.synchronize()
+            times["two views"].append(time.perf_counter() - start)
+
+        # the median of the repeats, in milliseconds per image
+        result = {key: 1000 * np.median(v) / len(images) for key, v in times.items()}
+        result["ratio"] = result["two views"] / result["one view"]
+
+        return result
 
     def get_signals(self, split: str) -> dict:
         """it computes the prediction, entropy, JS and the other signals for every image of a split"""
@@ -470,33 +501,44 @@ class Experiments:
 #                 for domain in domains[dataset]:
 #                     main(model_name, dataset, domain, k)
 
-def main(model_name: str, dataset: str, domain: str, k: int) -> None:
-    exp = Experiments(model_name=model_name, domain=domain, k=k, dataset=dataset)
-    runs = [(n, r, o) for n in ["B1", "B1n", "B1x"] for r in target_rates for o in order_seeds]
-    summaries = [exp.run_condition(n, r, 0.0, o) for n, r, o in tqdm(runs, f"B1 {domain} k={k}", unit="runs")]
+# def main(model_name: str, dataset: str, domain: str, k: int) -> None:
+#     exp = Experiments(model_name=model_name, domain=domain, k=k, dataset=dataset)
+#     runs = [(n, r, o) for n in ["B1", "B1n", "B1x"] for r in target_rates for o in order_seeds]
+#     summaries = [exp.run_condition(n, r, 0.0, o) for n, r, o in tqdm(runs, f"B1 {domain} k={k}", unit="runs")]
 
-    # how similar B1 and B2 are: the share of test images that both admit at 50%
-    dev, test = exp.signals["dev"], exp.signals["test"]
-    b1 = test["entropy"] <= np.quantile(dev["entropy"], 0.5)
-    b2 = test["mean_entropy"] <= np.quantile(dev["mean_entropy"], 0.5)
-    both, either = 100 * (b1 & b2).mean(), 100 * (b1 | b2).mean()
-    print(f"{model_name} {domain} k={k}: B1 admits {100 * b1.mean():.1f}%, B2 {100 * b2.mean():.1f}%, "
-          f"both {both:.1f}%, same decision for {100 * (b1 == b2).mean():.1f}% of images, overlap/union {100 * both / either:.1f}%")
+#     # how similar B1 and B2 are: the share of test images that both admit at 50%
+#     dev, test = exp.signals["dev"], exp.signals["test"]
+#     b1 = test["entropy"] <= np.quantile(dev["entropy"], 0.5)
+#     b2 = test["mean_entropy"] <= np.quantile(dev["mean_entropy"], 0.5)
+#     both, either = 100 * (b1 & b2).mean(), 100 * (b1 | b2).mean()
+#     print(f"{model_name} {domain} k={k}: B1 admits {100 * b1.mean():.1f}%, B2 {100 * b2.mean():.1f}%, "
+#           f"both {both:.1f}%, same decision for {100 * (b1 == b2).mean():.1f}% of images, overlap/union {100 * both / either:.1f}%")
 
-    def mean_acc(name):
-        # B1 runs come from the summaries, the other conditions are already saved and only loaded
-        if name.startswith("B1"):
-            return np.mean([s["accuracy"] for s in summaries if s["name"] == name and s["rate"] == 0.5])
-        rate = None if name.startswith("C0") else 0.5
-        return np.mean([exp.run_condition(name, rate, 0.0, o)["accuracy"] for o in order_seeds])
+#     def mean_acc(name):
+#         # B1 runs come from the summaries, the other conditions are already saved and only loaded
+#         if name.startswith("B1"):
+#             return np.mean([s["accuracy"] for s in summaries if s["name"] == name and s["rate"] == 0.5])
+#         rate = None if name.startswith("C0") else 0.5
+#         return np.mean([exp.run_condition(name, rate, 0.0, o)["accuracy"] for o in order_seeds])
 
-    names = ["C0", "B1", "B2", "P1", "C0x", "B1x", "B2x", "P1x"]
-    print(f"{model_name} {domain} k={k}: " + ", ".join(f"{n} {mean_acc(n):.2f}" for n in names))
+#     names = ["C0", "B1", "B2", "P1", "C0x", "B1x", "B2x", "P1x"]
+#     print(f"{model_name} {domain} k={k}: " + ", ".join(f"{n} {mean_acc(n):.2f}" for n in names))
+
+
+# if __name__ == "__main__":
+#     for model_name in model_names:
+#         for dataset in ["officehome", "imageneta", "imagenetr"]:
+#             for k in k_values:
+#                 for domain in domains[dataset]:
+#                     main(model_name, dataset, domain, k)
+
+def main(model_name: str) -> None:
+    # one domain is enough, the encoding cost does not depend on the data
+    exp = Experiments(model_name=model_name, domain="Art", k=3, dataset="officehome")
+    t = exp.time_views()
+    print(f"{model_name}: one view {t['one view']:.2f} ms/image, two views {t['two views']:.2f} ms/image, ratio {t['ratio']:.2f}")
 
 
 if __name__ == "__main__":
     for model_name in model_names:
-        for dataset in ["officehome", "imageneta", "imagenetr"]:
-            for k in k_values:
-                for domain in domains[dataset]:
-                    main(model_name, dataset, domain, k)
+        main(model_name)
